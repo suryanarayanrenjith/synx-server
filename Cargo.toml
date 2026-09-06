@@ -1,0 +1,23 @@
+# The SYNX multiplayer server, as its own workspace.
+#
+# Self-contained on purpose: nothing in here refers to anything above it. The
+# only thing it shares with the game is `protocol/`, which lives in here and
+# which the game core reaches into by path - so there is one copy of the wire
+# format and both halves compile the same bytes.
+[workspace]
+resolver = "2"
+members = ["protocol", "synx-server"]
+
+# A smaller binary starts faster, and start-up time is the one latency a
+# player is ever aware of, so size is weighted against the last few percent of
+# speed rather than the other way round.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+# Unwind, not abort. A server is a process that must survive its own bugs: a
+# panic in one room or one connection has to end that task and nothing else,
+# and `abort` would turn any of them into an outage for everybody. The
+# supervisors in hub.rs and ws.rs reclaim what a panicking task was holding.
+panic = "unwind"
+strip = true

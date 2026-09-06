@@ -1,0 +1,229 @@
+//! SYNX multiplayer server.
+//!
+//! Lobbies of four, seven routes, an authoritative race director and a
+//! physics-envelope validator.
+//!
+//! # The map
+//!
+//! ```text
+//!   main.rs       this: boot, logging, routing, shutdown
+//!   config.rs     everything tunable, from the environment
+//!   course.rs     the road, read from an asset the game's own core emitted
+//!   maps.rs       the seven routes and the physical envelope of a car
+//!   identity.rs   names, device prints, proof of work, session tokens
+//!   limits.rs     token buckets and per-address caps
+//!   control.rs    the lobby protocol (JSON)
+//!   validate.rs   is that a position a car could be in?
+//!   room.rs       one lobby and one race, as an actor
+//!   hub.rs        the registry of rooms and sessions
+//!   ws.rs         one connection, from upgrade to close
+//!   api.rs        health, wake, registration, diagnostics
+//! ```
+//!
+//! # Why it is this verbose
+//!
+//! When somebody reports that a race ended strangely, the only evidence that
+//! will ever exist is what was written to standard output while it was
+//! happening. There is nothing to reproduce it on and nothing to attach a
+//! debugger to.
+//!
+//! So the server says what it is doing: every room opening and closing, every
+//! player joining and leaving, every race starting with its grid and finishing
+//! with its order, every refused state with the reason, and a heartbeat every
+//! minute with the shape of the whole process. `RUST_LOG` turns the volume up
+//! or down; the default is the level that makes a bug report answerable.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::routing::{get, post};
+use axum::Router;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
+
+mod api;
+mod config;
+mod control;
+mod course;
+mod hub;
+mod identity;
+mod limits;
+mod maps;
+mod room;
+mod validate;
+mod ws;
+
+/// Stamped into the welcome, the health response and the log, so a bug report
+/// can name the build it came from.
+pub const BUILD: &str = concat!("synx-server ", env!("CARGO_PKG_VERSION"));
+
+fn main() {
+    // The runtime is built by hand rather than through `#[tokio::main]` for
+    // one reason: the worker count.
+    //
+    // The default is one worker per CPU as the OS reports it, and a container
+    // sees the whole host rather than its own share of it - so a process with
+    // a fraction of a core spawns eight or sixteen workers that spend their
+    // time contending for it and stealing work from each other. Two is enough
+    // to keep a slow socket write from stalling a room tick, and small enough
+    // that the scheduler is not the workload.
+    let workers: usize = std::env::var("SYNX_WORKERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2)
+        .clamp(1, 8);
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .thread_name("synx")
+        // 512 kB rather than the 2 MB default. Nothing here recurses and
+        // nothing here has a large stack frame, so the rest is address space
+        // reserved for no reason.
+        .thread_stack_size(512 * 1024)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+
+    rt.block_on(serve(workers));
+}
+
+async fn serve(workers: usize) {
+    // Timestamps in the log even though the host adds its own, because the
+    // host's are when it received the line and these are when it happened, and
+    // under load those are not the same.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,synx_server=debug")),
+        )
+        .with_target(false)
+        .with_level(true)
+        .compact()
+        .init();
+
+    info!("===========================================================");
+    info!("{BUILD}  protocol {}  workers {workers}", synx_net::PROTOCOL_VERSION);
+    info!("===========================================================");
+
+    let config = Arc::new(config::Config::from_env());
+    config.log();
+
+    // The road, before anything can connect. A server that cannot validate
+    // must not accept players, so a bad asset is fatal here rather than a
+    // surprise on the first packet.
+    let course = Arc::new(course::Course::embedded());
+    for m in maps::MAPS.iter() {
+        info!(
+            id = m.id,
+            name = m.name,
+            km = m.km(),
+            from = m.from,
+            to = m.to,
+            corridor = m.road_half * 2.0,
+            "route"
+        );
+    }
+
+    let hub = hub::Hub::new(config.clone(), course);
+
+    let cors = if config.allowed_origins.is_empty() {
+        // The API carries no cookies and no credentials, and the game runs
+        // from a native host with an opaque origin, so there is nothing for a
+        // same-origin policy to protect here. The socket is authenticated by
+        // its token, which is what actually matters.
+        CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any)
+    } else {
+        let origins: Vec<_> = config
+            .allowed_origins
+            .iter()
+            .filter_map(|o| o.parse::<axum::http::HeaderValue>().ok())
+            .collect();
+        CorsLayer::new().allow_origin(origins).allow_methods(Any).allow_headers(Any)
+    };
+
+    let app = Router::new()
+        .route("/", get(api::index))
+        .route("/healthz", get(api::healthz))
+        .route("/wake", get(api::wake))
+        .route("/api/handshake", get(api::handshake))
+        .route("/api/session", post(api::session))
+        .route("/api/rooms", get(api::rooms))
+        .route("/api/stats", get(api::stats))
+        .route("/ws", get(ws::upgrade))
+        .fallback(api::not_found)
+        // Order is outermost-last. A request meets the timeout, then the body
+        // limit, then the gate, then the handler - so a body that is too large
+        // is refused before the gate spends a lock on it, and nothing can hold
+        // a task open indefinitely.
+        .layer(axum::middleware::from_fn_with_state(hub.clone(), api::gate))
+        .layer(RequestBodyLimitLayer::new(16 * 1024))
+        .layer(TimeoutLayer::with_status_code(
+            axum::http::StatusCode::REQUEST_TIMEOUT,
+            config.request_timeout,
+        ))
+        .layer(cors)
+        .with_state(hub.clone());
+
+    tokio::spawn(api::housekeeping(hub.clone()));
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!(%addr, error = %e, "could not bind; is PORT already in use?");
+            std::process::exit(1);
+        }
+    };
+
+    hub.mark_ready();
+    info!(%addr, "listening; the grid is open");
+
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown(hub.clone()));
+
+    if let Err(e) = server.await {
+        error!(error = %e, "server stopped");
+    }
+    // One last line with the shape of the session, because it is often the
+    // only record that the process was ever healthy.
+    hub.housekeeping();
+    info!("stopped");
+}
+
+/// Ctrl-C, or SIGTERM.
+///
+/// Rooms are told to close and the sockets are given a moment to drain, which
+/// turns "everybody's connection died" into "the room closed" on the way
+/// through a restart.
+async fn shutdown(hub: Arc<hub::Hub>) {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => info!("interrupted"),
+        _ = terminate => info!("terminated"),
+    }
+    info!(rooms = hub.room_count(), players = hub.player_count(), "closing rooms");
+    hub.close_all().await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+}

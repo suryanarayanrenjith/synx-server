@@ -1,0 +1,77 @@
+# Render blueprint for the SYNX multiplayer server.
+#
+#   Root Directory   .
+#   Runtime          Docker
+#   Health Check     /healthz
+#
+# The repository root contains the Dockerfile and the complete Rust workspace.
+services:
+  - type: web
+    name: synx-multiplayer
+    runtime: docker
+    plan: free
+    region: singapore
+    rootDir: .
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      # PORT is injected by Render.
+
+      # Signs session tokens. Generated and kept by Render, so a redeploy does
+      # not invalidate every open session on top of restarting the process.
+      - key: SYNX_TOKEN_SECRET
+        generateValue: true
+
+      - key: RUST_LOG
+        value: info,synx_server=debug
+      - key: RUST_BACKTRACE
+        value: "1"
+
+      # A container reports the host's whole CPU count, so the tokio default
+      # would spawn eight workers to share a fraction of a core.
+      - key: SYNX_WORKERS
+        value: "2"
+
+      # ---- capacity ----------------------------------------------------
+      - key: SYNX_MAX_ROOMS
+        value: "24"
+      - key: SYNX_MAX_CONNECTIONS
+        value: "96"
+      - key: SYNX_MAX_PER_IP
+        value: "4"
+      - key: SYNX_MAX_INFLIGHT
+        value: "64"
+
+      # ---- tick rates --------------------------------------------------
+      - key: SYNX_SNAPSHOT_HZ
+        value: "20"
+      - key: SYNX_LOBBY_HZ
+        value: "4"
+
+      # ---- overload and abuse -----------------------------------------
+      # HTTP requests per address per second, connection attempts per address
+      # per second, and new connections per second across the whole process.
+      # Anything over these is throttled and then jailed; see src/limits.rs.
+      - key: SYNX_HTTP_RATE
+        value: "8"
+      - key: SYNX_CONNECT_RATE
+        value: "1"
+      - key: SYNX_ACCEPT_RATE
+        value: "20"
+      - key: SYNX_REQUEST_TIMEOUT
+        value: "15"
+      - key: SYNX_MAX_SOCKET
+        value: "10800"
+
+      # ---- identity ----------------------------------------------------
+      - key: SYNX_POW_BITS
+        value: "16"
+      - key: SYNX_REGISTER_PER_MINUTE
+        value: "12"
+      - key: SYNX_SESSION_TTL
+        value: "43200"
+
+      # ---- anti-cheat --------------------------------------------------
+      - key: SYNX_CORRECTION_STRIKES
+        value: "40"

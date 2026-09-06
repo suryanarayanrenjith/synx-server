@@ -1,0 +1,9 @@
+target/
+**/target/
+.git
+.gitignore
+*.log
+.env
+.env.*
+README.md
+render.yaml

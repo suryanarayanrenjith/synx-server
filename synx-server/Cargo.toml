@@ -1,0 +1,38 @@
+[package]
+name = "synx-server"
+version = "1.0.0"
+edition = "2021"
+description = "SYNX multiplayer server: lobbies, an authoritative race director and a physics-envelope validator."
+default-run = "synx-server"
+
+[dependencies]
+# The wire format, shared byte for byte with the game.
+synx-net = { path = "../protocol" }
+
+# HTTP and WebSocket. axum is the thinnest thing that gives routing, extractors
+# and a WebSocket upgrade over hyper without dragging a framework in behind it.
+axum = { version = "0.8", features = ["ws", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "limit", "timeout"] }
+# Splitting the WebSocket into a reader and a writer, which is what lets the
+# two run as independent tasks.
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+# Structured logging. The whole server is verbose by design - see main.rs.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+
+# Lobby control messages only. The per-frame path is binary and never sees this.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Session tokens: a SHA-256 HMAC over a payload the server signs and verifies.
+# RustCrypto rather than a hand-rolled one, because a hand-rolled MAC is the
+# one piece of this that cannot be reviewed by reading it.
+sha2 = "0.10"
+hmac = "0.12"
+rand = "0.8"
+base64 = "0.22"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }

@@ -1,0 +1,29 @@
+# Build output. `target/` here is this workspace's own; the game has a separate
+# one at the repository root.
+/target/
+**/target/
+
+# Local overrides. Everything the server reads is an environment variable (see
+# src/config.rs), and the one that matters - SYNX_TOKEN_SECRET - must never be
+# committed: a leaked signing key is a forgeable session token.
+.env
+.env.*
+!.env.example
+
+# Editors and platforms
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs and profiles from a local run
+*.log
+perf.data*
+flamegraph.svg
+
+# The course asset IS committed on purpose. It is emitted by
+#   cargo run -p synx-core --release --bin mkcourse
+# from the game's own centreline, and the server refuses to start without it -
+# so it is part of the deployment, not a build artefact. Do not add
+# assets/course.bin here.

@@ -1,0 +1,13 @@
+[package]
+name = "synx-net"
+version = "1.0.0"
+edition = "2021"
+description = "SYNX multiplayer wire protocol: the quantisation and the byte layout, compiled into both the WebAssembly client core and the native server."
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+
+[features]
+default = []
