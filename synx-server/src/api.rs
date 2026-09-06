@@ -14,6 +14,7 @@ use serde::Serialize;
 use serde_json::json;
 use tracing::{info, warn};
 
+use crate::client::{self, Claim};
 use crate::hub::Hub;
 use crate::identity::{
     self, ChallengeResponse, DevicePrint, RegisterError, RegisterRequest, RegisterResponse,
@@ -111,6 +112,8 @@ pub async fn handshake(State(hub): State<Arc<Hub>>) -> impl IntoResponse {
         ttl_ms: 120_000,
         server_time_ms: identity::now_ms(),
         protocol: synx_net::PROTOCOL_VERSION,
+        fingerprint: synx_net::WIRE_FINGERPRINT,
+        attestation_required: !hub.config.client_secrets.is_empty() && hub.config.strict_client,
         build: crate::BUILD,
         ready: hub.is_ready(),
     })
@@ -144,6 +147,34 @@ pub async fn session(
     if req.protocol != 0 && req.protocol != synx_net::PROTOCOL_VERSION {
         warn!(%ip, theirs = req.protocol, ours = synx_net::PROTOCOL_VERSION, "protocol mismatch");
         return refuse(RegisterError::ProtocolMismatch, RegisterError::ProtocolMismatch.as_str());
+    }
+
+    // Is this our client, speaking our wire format? Answered before the proof
+    // of work is verified and before anything is allocated for this caller,
+    // because a client that will not be admitted should cost one HMAC.
+    let claim = Claim {
+        challenge: &req.challenge,
+        protocol: if req.protocol == 0 { synx_net::PROTOCOL_VERSION } else { req.protocol },
+        fingerprint: req.fingerprint,
+        build: &req.build,
+        attestation: Some(req.attestation.as_str()).filter(|s| !s.is_empty()),
+    };
+    if let Err(r) = client::admit(&hub.config, &headers, &claim) {
+        hub.stats.clients_refused.fetch_add(1, Ordering::Relaxed);
+        warn!(
+            %ip,
+            refusal = r.code(),
+            theirs = req.fingerprint,
+            ours = synx_net::WIRE_FINGERPRINT,
+            build = %req.build,
+            origin = ?headers.get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()),
+            "client refused at the door"
+        );
+        return (
+            StatusCode::from_u16(r.status()).unwrap_or(StatusCode::FORBIDDEN),
+            Json(json!({ "error": r.code(), "message": r.as_str() })),
+        )
+            .into_response();
     }
 
     // Metered before the proof is checked, so a flood of bad proofs is a flood
@@ -182,6 +213,7 @@ pub async fn session(
         Json(json!(RegisterResponse {
             token,
             name,
+            fingerprint: synx_net::WIRE_FINGERPRINT,
             session: sess.id.to_string(),
             device: device.short(),
             expires_ms: sess.expires_ms,
@@ -196,7 +228,7 @@ pub async fn session(
 fn refuse(e: RegisterError, message: &str) -> axum::response::Response {
     (
         StatusCode::from_u16(e.status()).unwrap_or(StatusCode::BAD_REQUEST),
-        Json(json!({ "error": e.as_str(), "message": message })),
+        Json(json!({ "error": e.code(), "message": message })),
     )
         .into_response()
 }
@@ -224,6 +256,7 @@ pub async fn stats(State(hub): State<Arc<Hub>>) -> impl IntoResponse {
     Json(json!({
         "build": crate::BUILD,
         "protocol": synx_net::PROTOCOL_VERSION,
+        "fingerprint": synx_net::WIRE_FINGERPRINT,
         "ready": hub.is_ready(),
         "uptime_s": hub.uptime_s(),
         "course": {
@@ -268,6 +301,14 @@ pub async fn stats(State(hub): State<Arc<Hub>>) -> impl IntoResponse {
             "http_rate": hub.config.http_rate,
             "accept_rate": hub.config.accept_rate,
         },
+        "client_gate": {
+            "origins": hub.config.allowed_origins,
+            "strict": hub.config.strict_client,
+            "attestation": !hub.config.client_secrets.is_empty(),
+            "attestation_keys": hub.config.client_secrets.len(),
+            "min_client": hub.config.min_client.map(|(a, b, c)| format!("{a}.{b}.{c}")),
+            "refused": s.clients_refused.load(Ordering::Relaxed),
+        },
         "faults": {
             "rooms_panicked": s.rooms_panicked.load(Ordering::Relaxed),
         },
@@ -281,6 +322,7 @@ pub async fn index(State(hub): State<Arc<Hub>>) -> impl IntoResponse {
          =======================\n\
          build      {}\n\
          protocol   {}\n\
+         wire       {:08x}\n\
          status     {}\n\
          uptime     {} s\n\
          rooms      {}\n\
@@ -288,13 +330,14 @@ pub async fn index(State(hub): State<Arc<Hub>>) -> impl IntoResponse {
          \n\
          GET  /healthz          liveness\n\
          GET  /wake             wake the instance, and how awake it is\n\
-         GET  /api/handshake    a registration challenge\n\
+         GET  /api/handshake    a registration challenge and this wire fingerprint\n\
          POST /api/session      register, and receive a session token\n\
          GET  /api/rooms        public lobbies\n\
          GET  /api/stats        everything this process knows about itself\n\
          WS   /ws?token=...     the game\n",
         crate::BUILD,
         synx_net::PROTOCOL_VERSION,
+        synx_net::WIRE_FINGERPRINT,
         if hub.is_ready() { "ready" } else { "starting" },
         hub.uptime_s(),
         hub.room_count(),

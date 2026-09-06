@@ -43,6 +43,9 @@ pub struct Stats {
     pub requests_refused: AtomicU64,
     pub shed: AtomicU64,
     pub rooms_panicked: AtomicU64,
+    /// Clients turned away by the door in `client.rs` - wrong wire
+    /// format, wrong origin, or unable to prove they are the game.
+    pub clients_refused: AtomicU64,
 }
 
 pub struct Hub {

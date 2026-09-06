@@ -3,13 +3,13 @@
 use core::f32::consts::PI;
 
 /// `i16` per radian over the full turn. `32767 / pi`.
-const ANGLE_SCALE: f32 = 10430.219;
+pub const ANGLE_SCALE: f32 = 10430.219;
 /// `i16` per world unit per second. Range +-256 u/s against a 122 u/s ceiling.
-const VEL_SCALE: f32 = 128.0;
+pub const VEL_SCALE: f32 = 128.0;
 /// `i16` per radian per second. Range +-8 rad/s against a 3.6 rad/s clamp.
-const RATE_SCALE: f32 = 4096.0;
+pub const RATE_SCALE: f32 = 4096.0;
 /// `i16` per world unit of lateral offset. Range +-128 against a 32 u corridor.
-const LATERAL_SCALE: f32 = 256.0;
+pub const LATERAL_SCALE: f32 = 256.0;
 
 #[inline]
 fn clampf(v: f32, lo: f32, hi: f32) -> f32 {

@@ -6,13 +6,14 @@ use std::time::Duration;
 
 use axum::routing::{get, post};
 use axum::Router;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 mod api;
+mod client;
 mod config;
 mod control;
 mod course;
@@ -96,19 +97,26 @@ async fn serve(workers: usize) {
 
     let hub = hub::Hub::new(config.clone(), course);
 
+    // CORS answers the browser's question - "may this page call you?" - using
+    // the same allowlist the door itself uses, so a client is never told yes
+    // by the preflight and no by the handler.
+    //
+    // A predicate rather than a fixed list, because the dev entries name a
+    // host without a port and the harness serves the game from whatever port
+    // it was given. `client::origin_allows` is the single place that decides.
     let cors = if config.allowed_origins.is_empty() {
-        // The API carries no cookies and no credentials, and the game runs
-        // from a native host with an opaque origin, so there is nothing for a
-        // same-origin policy to protect here. The socket is authenticated by
-        // its token, which is what actually matters.
         CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any)
     } else {
-        let origins: Vec<_> = config
-            .allowed_origins
-            .iter()
-            .filter_map(|o| o.parse::<axum::http::HeaderValue>().ok())
-            .collect();
-        CorsLayer::new().allow_origin(origins).allow_methods(Any).allow_headers(Any)
+        let allowed = config.allowed_origins.clone();
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::predicate(move |origin, _req| {
+                origin
+                    .to_str()
+                    .map(|o| client::origin_allows(&allowed, o))
+                    .unwrap_or(false)
+            }))
+            .allow_methods(Any)
+            .allow_headers(Any)
     };
 
     let app = Router::new()

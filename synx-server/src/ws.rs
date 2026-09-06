@@ -88,7 +88,29 @@ pub async fn upgrade(
 ) -> Response {
     let ip = client_ip(&headers, peer);
 
-    // The token first: an unauthenticated socket never gets upgraded, so an
+    // ORIGIN, BEFORE THE TOKEN.
+    //
+    // CORS does not apply to WebSockets: a browser will happily open one to
+    // any host and hand the page the frames, with no preflight to refuse it.
+    // The `Origin` header is still sent and still unforgeable by a script, so
+    // for a browser client this is the only place the same check can be made -
+    // and without it the socket would be the unguarded way in to a server whose
+    // front door is locked.
+    if hub.config.strict_client {
+        if let crate::client::OriginVerdict::Refused =
+            crate::client::check_origin(&hub.config, &headers)
+        {
+            hub.stats.clients_refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            warn!(
+                %ip,
+                origin = ?headers.get(axum::http::header::ORIGIN).and_then(|v| v.to_str().ok()),
+                "websocket refused: origin"
+            );
+            return (StatusCode::FORBIDDEN, crate::client::Refusal::Origin.as_str()).into_response();
+        }
+    }
+
+    // The token next: an unauthenticated socket never gets upgraded, so an
     // attacker cannot make the server hold open connections for free.
     let session = {
         let mut reg = hub.sessions.lock().unwrap();

@@ -16,6 +16,47 @@ services:
       - key: SYNX_TOKEN_SECRET
         generateValue: true
 
+      # ---- who is allowed in -------------------------------------------
+      # The keys the game client may be BUILT with. Cannot be generated here:
+      # the same value has to be compiled into the desktop build, or the server
+      # refuses its own game. Set it by hand and keep it wherever releases are
+      # built from.
+      #
+      # A LIST, comma separated - a client matching any entry is admitted. That
+      # is what lets a key be rotated without bricking the copies people have
+      # already downloaded: add the new one beside the old, ship the build that
+      # uses it, then drop the old entry when you are ready to retire the
+      # builds that carry it.
+      #
+      # Left unset, the server accepts any client and warns about it at boot,
+      # which is right for a first deploy and not for the one the public uses.
+      #
+      # Worth knowing what this is and is not: a secret inside a public
+      # download is not a secret. It raises the cost of misuse from "copy a
+      # URL" to "reverse-engineer a binary" and tags which build is calling.
+      # It is not what keeps the server safe - the physics validator, the proof
+      # of work and the rate limits below are.
+      - key: SYNX_CLIENT_SECRET
+        sync: false
+
+      # The oldest client build admitted, as major.minor.patch. The build
+      # string is inside the attestation signature, so it cannot be faked.
+      # Raising this retires old releases immediately, for everyone, without
+      # shipping anything - which is what makes a leaked key recoverable.
+      # Unset means any version.
+      - key: SYNX_MIN_CLIENT
+        sync: false
+
+      # The origins a Tauri desktop build presents. Unset, the server uses
+      # exactly this list as its default; it is written out here so that
+      # changing it is an edit rather than an archaeology expedition.
+      - key: SYNX_ALLOWED_ORIGINS
+        value: tauri://localhost,http://tauri.localhost,https://tauri.localhost
+
+      # Refuse rather than merely log. See src/client.rs.
+      - key: SYNX_STRICT_CLIENT
+        value: "true"
+
       - key: RUST_LOG
         value: info,synx_server=debug
       - key: RUST_BACKTRACE

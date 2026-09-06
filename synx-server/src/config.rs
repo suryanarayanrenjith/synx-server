@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Read an environment variable, or fall back, complaining about anything set
 /// to something that will not parse rather than silently using the default.
@@ -17,6 +17,53 @@ fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
             }
         },
     }
+}
+
+/// The origins a SYNX desktop build actually presents.
+///
+/// Tauri serves the bundled page from a custom scheme, and which one depends on
+/// the platform: `tauri://localhost` on macOS and Linux, `http://tauri.localhost`
+/// on Windows, where a custom scheme cannot be used for the main document. The
+/// `https://` form covers Tauri builds configured to serve over it. The two
+/// loopback entries are for running the game against `python -m http.server`
+/// during development, which is how the harness drives it.
+///
+/// A native process can of course send whatever `Origin` it likes, so this list
+/// is not what stops a hand-written client - that is what attestation is for.
+/// What it does stop is any web page, anywhere, using this server: the browser
+/// sets that header itself and will not let a script change it.
+pub const DEFAULT_CLIENT_ORIGINS: &[&str] = &[
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "http://localhost",
+    "http://127.0.0.1",
+];
+
+/// Parse `major.minor.patch`, ignoring anything before the first digit so that
+/// both "1.2.3" and "synx 1.2.3" are read the same way.
+///
+/// A version that will not parse is treated as absent rather than as zero: a
+/// floor nobody can satisfy would lock every client out, and a floor of zero
+/// would silently admit everything. Neither is a good failure, so an
+/// unparseable one simply is not a floor.
+pub fn parse_version(raw: &str) -> Option<(u32, u32, u32)> {
+    let digits = raw.trim_start_matches(|c: char| !c.is_ascii_digit());
+    let mut it = digits.split('.');
+    let major = it.next()?.trim().parse().ok()?;
+    let minor = it.next().unwrap_or("0").trim().parse().unwrap_or(0);
+    // The patch field is where a suffix like "1.0.0-beta" turns up, so it is
+    // read up to the first character that is not a digit.
+    let patch = it
+        .next()
+        .unwrap_or("0")
+        .trim()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .unwrap_or(0);
+    Some((major, minor, patch))
 }
 
 #[derive(Debug, Clone)]
@@ -108,10 +155,55 @@ pub struct Config {
     /// slot it is not using; both are better off reconnecting.
     pub max_socket: Duration,
 
-    /// Extra origins allowed to call the HTTP API, comma separated. The game
-    /// runs from a `tauri://` or `file://` origin and sends no cookies, so the
-    /// default is permissive for the API and irrelevant for the WebSocket.
+    /// Which origins may speak to this server, comma separated.
+    ///
+    /// SYNX ships as a desktop application, so the origins that matter are the
+    /// ones a Tauri webview presents - `tauri://localhost` on macOS and Linux,
+    /// `http://tauri.localhost` on Windows - plus a local dev server. When
+    /// `SYNX_ALLOWED_ORIGINS` is unset those defaults apply rather than "any",
+    /// which is the whole point: a browser will not let a page on some other
+    /// site forge its `Origin`, so this single check is what stops the server
+    /// being quietly adopted as free infrastructure by a web client that is
+    /// not this game.
     pub allowed_origins: Vec<String>,
+
+    /// The secrets a client may sign its handshake with. Comma separated in
+    /// `SYNX_CLIENT_SECRET`; a client is admitted if it matches ANY of them.
+    ///
+    /// A LIST RATHER THAN ONE VALUE, because the client is a public download
+    /// and the alternative is a trap. With a single secret, changing it here
+    /// instantly breaks every copy anyone has already installed - there is no
+    /// window in which both the old build and the new one work, so rotating
+    /// the key and shipping the update can never be two separate decisions.
+    ///
+    /// With a list they are. Add the new secret beside the old one, ship the
+    /// build that uses it, wait as long as you like, then drop the old entry.
+    /// Dropping it is what retires the builds that carry it - deliberately,
+    /// at a moment you choose, rather than the instant you edit a variable.
+    ///
+    /// Empty means attestation is skipped, and the fact is logged loudly at
+    /// boot: a server that believes it is locked down and is not is worse than
+    /// one that never claimed to be.
+    pub client_secrets: Vec<Vec<u8>>,
+
+    /// The oldest client build this server will admit, from `SYNX_MIN_CLIENT`
+    /// as `major.minor.patch`.
+    ///
+    /// The build string travels INSIDE the attestation signature, so an
+    /// attested client cannot claim to be newer than it is. That makes this
+    /// the one lever that retires a compromised or broken release without
+    /// waiting for anybody to update anything: raise the floor, and the old
+    /// builds are told to update the next time they connect.
+    pub min_client: Option<(u32, u32, u32)>,
+
+    /// Whether a client that fails the origin or attestation check is refused
+    /// or merely logged.
+    ///
+    /// Strict is the default and the intended posture. The permissive setting
+    /// exists for the afternoon when a deployment is being moved and locking
+    /// yourself out of your own server is a real risk; it is not a setting to
+    /// leave on.
+    pub strict_client: bool,
 
     /// Secret the session tokens are signed with. Generated per process when
     /// unset, which is safe: a session does not outlive the process either
@@ -173,12 +265,30 @@ impl Config {
             max_inflight: env_or::<usize>("SYNX_MAX_INFLIGHT", 64).clamp(4, 4_096),
             request_timeout: Duration::from_secs(env_or::<u64>("SYNX_REQUEST_TIMEOUT", 15).clamp(1, 120)),
             max_socket: Duration::from_secs(env_or::<u64>("SYNX_MAX_SOCKET", 10_800).clamp(60, 86_400)),
-            allowed_origins: std::env::var("SYNX_ALLOWED_ORIGINS")
+            allowed_origins: {
+                let configured: Vec<String> = std::env::var("SYNX_ALLOWED_ORIGINS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if configured.is_empty() {
+                    DEFAULT_CLIENT_ORIGINS.iter().map(|s| s.to_string()).collect()
+                } else {
+                    configured
+                }
+            },
+            client_secrets: std::env::var("SYNX_CLIENT_SECRET")
                 .unwrap_or_default()
                 .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
+                .map(|s| s.trim())
+                // Short entries are dropped rather than accepted, so a typo
+                // cannot quietly weaken the check to something guessable.
+                .filter(|s| s.len() >= 16)
+                .map(|s| s.as_bytes().to_vec())
                 .collect(),
+            min_client: std::env::var("SYNX_MIN_CLIENT").ok().and_then(|s| parse_version(&s)),
+            strict_client: env_or::<bool>("SYNX_STRICT_CLIENT", true),
             token_secret: secret,
             token_secret_generated: generated,
         }
@@ -186,7 +296,6 @@ impl Config {
 
     /// One line per setting, at boot. See the note at the top of the file.
     pub fn log(&self) {
-        use tracing::info;
         info!("---- configuration ----------------------------------------");
         info!(port = self.port, "listen");
         info!(snapshot_hz = self.snapshot_hz, lobby_hz = self.lobby_hz, "tick rates");
@@ -242,9 +351,21 @@ impl Config {
             }
         );
         if self.allowed_origins.is_empty() {
-            info!("cors: any origin (the game sends no credentials)");
+            warn!("origins: ANY - this server will answer a client on any site");
         } else {
-            info!(origins = ?self.allowed_origins, "cors");
+            info!(origins = ?self.allowed_origins, strict = self.strict_client, "origins");
+        }
+        match (self.client_secrets.len(), self.strict_client) {
+            (0, _) => warn!(
+                "client attestation: OFF - set SYNX_CLIENT_SECRET to the value \
+                 the game was built with to accept only your own client"
+            ),
+            (n, true) => info!(keys = n, "client attestation: required"),
+            (n, false) => warn!(keys = n, "client attestation: checked but not enforced"),
+        }
+        match self.min_client {
+            Some((a, b, c)) => info!("minimum client build: {a}.{b}.{c}"),
+            None => info!("minimum client build: any"),
         }
         info!("-----------------------------------------------------------");
     }
