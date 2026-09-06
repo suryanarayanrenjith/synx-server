@@ -643,18 +643,25 @@ mod tests {
         let m = &MAPS[0];
         let mut t = Track::new();
         t.place(m, &c, 0, 2, 0);
-        let fast = 118.0f32; // over the stock ceiling, inside the rebuilt one
         let lane = t.last.lateral;
+
+        // Just over the one ceiling there is: refused.
+        let fast = Ruleset::Stock.ceiling() + 10.0;
         let claim = in_lane(&c, t.last.s + 3.0, lane, fast, 33);
+        let mut over_by_a_little = t.clone();
+        assert_eq!(
+            check(&mut over_by_a_little, &rules(&c, m, 33), &claim).rejected(),
+            Some(Correction::Speed)
+        );
 
-        let mut stock = t.clone();
-        assert!(check(&mut stock, &rules(&c, m, 33), &claim).rejected().is_some());
+        // Absurdly over it: refused the same way, rather than wrapping or
+        // saturating into something that passes.
+        let mut absurd = t.clone();
+        let over = in_lane(&c, t.last.s + 6.0, lane, 4_000.0, 33);
+        assert_eq!(check(&mut absurd, &rules(&c, m, 33), &over).rejected(), Some(Correction::Speed));
 
-        let r = Rules { map: m, course: &c, ruleset: Ruleset::Rebuilt, now_ms: 33, live: true };
-        assert_eq!(check(&mut t, &r, &claim), Verdict::Accept);
-
-        let over = in_lane(&c, t.last.s + 6.0, lane, 200.0, 66);
-        let r = Rules { map: m, course: &c, ruleset: Ruleset::Rebuilt, now_ms: 66, live: true };
-        assert_eq!(check(&mut t, &r, &over).rejected(), Some(Correction::Speed));
+        // Comfortably under it: accepted.
+        let ok = in_lane(&c, t.last.s + 3.0, lane, Ruleset::Stock.ceiling() - 12.0, 33);
+        assert_eq!(check(&mut t, &rules(&c, m, 33), &ok), Verdict::Accept);
     }
 }

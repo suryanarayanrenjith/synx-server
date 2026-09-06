@@ -11,11 +11,11 @@ pub const DRIVE_HALF: f32 = 18.0;
 pub const TOP_SPEED: f32 = 290.0 / 3.6;
 /// What boost multiplies the ceiling by. `BOOST_TOP`.
 pub const BOOST_TOP: f32 = 1.34;
-/// The Forge rebuild: `SWAP_TOP`, `SWAP_CAP`.
-pub const SWAP_TOP: f32 = 88.0;
-pub const SWAP_CAP: f32 = 122.0;
-/// What the synchronised drive multiplies the ceiling by. `RACE_MODE_MULTIPLIER`.
-pub const RACE_MODE_TOP: f32 = 1.5;
+/* The Forge rebuild (`SWAP_TOP`, `SWAP_CAP`) and the synchronised drive
+   (`RACE_MODE_MULTIPLIER`) used to be named here, for the second ruleset.
+   There is no second ruleset - see `Ruleset` - so the numbers a validator
+   would have checked against them are gone with it. They remain campaign
+   rewards, and the campaign is not validated by this server. */
 /// Hard reverse limit from the solver: `v_long` is clamped to this below zero.
 pub const MAX_REVERSE: f32 = 18.0;
 
@@ -29,26 +29,33 @@ pub const CHECKPOINTS: u8 = 24;
 
 /// Which car everybody in the room is driving.
 ///
-/// The campaign hands the rebuilt engine out at the end of Chapter 6, which
-/// means two players who have got different distances through the story would
-/// otherwise arrive at the same start line in different cars. Multiplayer
-/// therefore does not read the save at all: the room picks one ruleset and
-/// everybody gets it, so a race is decided by driving.
+/// THERE IS EXACTLY ONE, AND THAT IS THE POINT.
+///
+/// Multiplayer does not read the save, because two players at different points
+/// in the campaign would otherwise arrive at the same start line in different
+/// cars and the race would be decided by who had played more of the story.
+/// The room used to pick between the street car and the Chapter 6 rebuild,
+/// which solved that within a room and reintroduced it between rooms: the same
+/// four drivers got a different race depending on a setting one of them had
+/// touched, and a lap time from one room meant nothing beside a lap time from
+/// another.
+///
+/// So there is one car, everybody is in it, and it cannot be changed. Not
+/// "defaults to stock" - there is no other value to hold, which is a stronger
+/// guarantee than a check somebody can forget to write. Race mode and the
+/// swapped engine are campaign rewards and stay in the campaign.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 #[repr(u8)]
 pub enum Ruleset {
-    /// The street car. What Chapter 1 hands you.
+    /// The street car. What Chapter 1 hands you, and the only car raced here.
     Stock = 0,
-    /// The Forge rebuild, and the synchronised drive that came with it.
-    Rebuilt = 1,
 }
 
 impl Ruleset {
     pub fn from_str(s: &str) -> Option<Ruleset> {
         match s {
             "stock" => Some(Ruleset::Stock),
-            "rebuilt" => Some(Ruleset::Rebuilt),
             _ => None,
         }
     }
@@ -60,17 +67,16 @@ impl Ruleset {
     /// wall and not a soft target - which is what makes it usable as a test.
     pub fn ceiling(self) -> f32 {
         match self {
-            // speed_cap is infinite on the stock engine, and race mode is not
-            // available under this ruleset, so boost is the only multiplier
+            // speed_cap is infinite on the stock engine, and race mode is a
+            // campaign reward that does not exist here, so boost is the only
+            // multiplier in play.
             Ruleset::Stock => TOP_SPEED * BOOST_TOP,
-            Ruleset::Rebuilt => SWAP_CAP.min(SWAP_TOP * BOOST_TOP * RACE_MODE_TOP),
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Ruleset::Stock => "STOCK",
-            Ruleset::Rebuilt => "REBUILT",
         }
     }
 }
@@ -259,11 +265,21 @@ mod tests {
     /// The ceilings are the whole anti-cheat model for speed, so they are
     /// asserted against the numbers in the solver rather than left implicit.
     #[test]
-    fn the_ceilings_match_the_solver() {
+    fn the_ceiling_matches_the_solver() {
         // 290 km/h * 1.34 = 388.6 km/h = 107.9 world units/s
         assert!((Ruleset::Stock.ceiling() - 107.94).abs() < 0.05);
-        // the rebuild is capped at 122 u/s, which the solver tests as 200 mph
-        assert!((Ruleset::Rebuilt.ceiling() - 122.0).abs() < 0.001);
-        assert!(Ruleset::Rebuilt.ceiling() > Ruleset::Stock.ceiling());
+    }
+
+    /// There is one car, and that is load-bearing rather than incidental: the
+    /// speed ceiling the validator enforces is derived from it, so a second
+    /// ruleset appearing would silently raise the wall for everybody in a room
+    /// that selected it. If this ever needs to change, the validator's
+    /// per-room ceiling is what has to be thought about first.
+    #[test]
+    fn there_is_exactly_one_car_and_nothing_else_parses() {
+        assert_eq!(Ruleset::from_str("stock"), Some(Ruleset::Stock));
+        for other in ["rebuilt", "REBUILT", "forge", "race", ""] {
+            assert_eq!(Ruleset::from_str(other), None, "{other:?} must not select a car");
+        }
     }
 }

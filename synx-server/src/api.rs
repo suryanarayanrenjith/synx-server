@@ -1,5 +1,6 @@
 //! HTTP endpoints for health, sessions, rooms, and diagnostics.
 
+use crate::sync::LockExt;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -172,7 +173,7 @@ pub async fn session(
 
     // Metered before the proof is checked, so a flood of bad proofs is a flood
     // of one hash each rather than of one hash plus a table entry each.
-    if !hub.ips.lock().unwrap().may_register(ip, hub.config.register_per_minute) {
+    if !hub.ips.lock_safe().may_register(ip, hub.config.register_per_minute) {
         warn!(%ip, "registration rate limited");
         return refuse(RegisterError::RateLimited, RegisterError::RateLimited.as_str());
     }
@@ -187,7 +188,7 @@ pub async fn session(
     // Capacity is checked here as well as at the socket, so a player is told
     // "the grid is full" on the screen where they can do something about it
     // rather than after they have picked a route.
-    if hub.sessions.lock().unwrap().len() >= hub.config.max_connections * 4 {
+    if hub.sessions.lock_safe().len() >= hub.config.max_connections * 4 {
         return refuse(RegisterError::ServerFull, RegisterError::ServerFull.as_str());
     }
 
@@ -196,7 +197,7 @@ pub async fn session(
     let device = print.hash(&hub.config.token_secret);
 
     let (token, sess) = {
-        let mut reg = hub.sessions.lock().unwrap();
+        let mut reg = hub.sessions.lock_safe();
         reg.open(&hub.config.token_secret, name.clone(), device, Some(ip), hub.config.session_ttl)
     };
     identity::log_registration(&sess, &print, Some(ip));
@@ -239,11 +240,11 @@ pub async fn rooms(State(hub): State<Arc<Hub>>) -> impl IntoResponse {
 pub async fn stats(State(hub): State<Arc<Hub>>) -> impl IntoResponse {
     let s = &hub.stats;
     let (sessions, connected, bans) = {
-        let r = hub.sessions.lock().unwrap();
+        let r = hub.sessions.lock_safe();
         (r.len(), r.connected(), r.bans())
     };
     let (addresses, connections, jailed) = {
-        let t = hub.ips.lock().unwrap();
+        let t = hub.ips.lock_safe();
         (t.addresses(), t.total(), t.jailed_count())
     };
     Json(json!({

@@ -22,6 +22,7 @@ mod identity;
 mod limits;
 mod maps;
 mod room;
+mod sync;
 mod validate;
 mod ws;
 
@@ -29,7 +30,69 @@ mod ws;
 /// can name the build it came from.
 pub const BUILD: &str = concat!("synx-server ", env!("CARGO_PKG_VERSION"));
 
+/* THE CONTAINER'S OWN HEALTH PROBE.
+ *
+ * `docker run` has no idea this process has a health endpoint unless the image
+ * says so, and the runtime image is Debian slim with nothing in it - no curl,
+ * no wget - because adding a whole HTTP client to a container so that it can
+ * make one request against itself is a poor trade.
+ *
+ * So the binary probes itself. `synx-server --health` opens a socket to its own
+ * port, writes the smallest valid HTTP/1.1 request, reads the status line and
+ * exits 0 or 1. That is about twenty lines against a dependency, it works in a
+ * scratch image as well as this one, and it can never disagree with the server
+ * about which port to use because it reads the same variable.
+ *
+ * Deliberately dumb: no redirects, no keep-alive, no body. It answers one
+ * question - is this process serving - and anything more would be a second
+ * implementation of something to go wrong.
+ */
+fn health_probe() -> i32 {
+    use std::io::{Read, Write};
+
+    let port: u16 = std::env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let timeout = std::time::Duration::from_secs(3);
+
+    let mut sock = match std::net::TcpStream::connect_timeout(&addr, timeout) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("health: cannot connect to {addr}: {e}");
+            return 1;
+        }
+    };
+    let _ = sock.set_read_timeout(Some(timeout));
+    let _ = sock.set_write_timeout(Some(timeout));
+
+    if let Err(e) = sock.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n") {
+        eprintln!("health: cannot ask: {e}");
+        return 1;
+    }
+    // The status line is the first forty bytes at most; there is no reason to
+    // read the body and every reason not to wait for it.
+    let mut head = [0u8; 64];
+    let n = match sock.read(&mut head) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("health: no answer: {e}");
+            return 1;
+        }
+    };
+    let line = String::from_utf8_lossy(&head[..n]);
+    if line.starts_with("HTTP/1.1 200") || line.starts_with("HTTP/1.0 200") {
+        0
+    } else {
+        eprintln!("health: {}", line.lines().next().unwrap_or("(nothing)"));
+        1
+    }
+}
+
 fn main() {
+    // One flag, and it is not really a mode: see health_probe.
+    if std::env::args().any(|a| a == "--health") {
+        std::process::exit(health_probe());
+    }
+
     // The runtime is built by hand rather than through `#[tokio::main]` for
     // one reason: the worker count.
     //

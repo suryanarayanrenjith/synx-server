@@ -51,6 +51,19 @@ ENV PORT=10000 \
     RUST_BACKTRACE=1
 EXPOSE 10000
 
+# A container that knows whether it is working.
+#
+# Render is told the health path separately in render.yaml, but a plain
+# `docker run` - or Compose, or a swarm, or anything else somebody deploys this
+# under - has no idea this process has a health endpoint unless the image says
+# so. `/healthz` answers without touching a lock or a room, so probing it every
+# thirty seconds costs nothing.
+#
+# `start-period` is generous because the course asset is parsed at boot; until
+# that is done the server is up but not ready, and failing the probe during
+# startup would restart-loop a container that was about to be fine.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3   CMD ["/usr/local/bin/synx-server", "--health"]
+
 # The course asset is compiled into the binary (see src/course.rs), so there is
 # nothing to mount and nothing to go missing.
 ENTRYPOINT ["/usr/local/bin/synx-server"]

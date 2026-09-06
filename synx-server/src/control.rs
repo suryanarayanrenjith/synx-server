@@ -41,8 +41,10 @@ pub enum ClientMsg {
     Ready { on: bool },
     /// Host only.
     Map { map: u8 },
-    /// Host only.
-    Ruleset { ruleset: String },
+    /// Accepted and refused. There is one car - see `maps::Ruleset` - and the
+    /// field is kept only so an older client gets an answer rather than
+    /// silence. Never read.
+    Ruleset { #[allow(dead_code)] ruleset: String },
     /// Host only.
     Start {},
     /// Host only.

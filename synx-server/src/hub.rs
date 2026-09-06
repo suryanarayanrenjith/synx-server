@@ -1,5 +1,6 @@
 //! Shared registry for rooms, sessions, addresses, and server statistics.
 
+use crate::sync::LockExt;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -154,7 +155,7 @@ impl Hub {
         let max_players = max_players.clamp(2, synx_net::MAX_PLAYERS as u8);
 
         let (code, handle) = {
-            let mut rooms = self.rooms.lock().unwrap();
+            let mut rooms = self.rooms.lock_safe();
             if rooms.len() >= self.config.max_rooms {
                 return Err(HubError::TooManyRooms);
             }
@@ -241,7 +242,7 @@ impl Hub {
         if !key.bytes().all(|b| crate::room::CODE_ALPHABET.contains(&b)) {
             return Err(HubError::NoSuchRoom);
         }
-        let rooms = self.rooms.lock().unwrap();
+        let rooms = self.rooms.lock_safe();
         rooms.get(&key).cloned().ok_or(HubError::NoSuchRoom)
     }
 
@@ -254,7 +255,7 @@ impl Hub {
     pub fn quick(self: &Arc<Self>, map: u8, ruleset: Ruleset) -> Result<RoomHandle, HubError> {
         let want_map = crate::maps::map(map).map(|m| m.id);
         {
-            let rooms = self.rooms.lock().unwrap();
+            let rooms = self.rooms.lock_safe();
             let mut best: Option<(u8, &RoomHandle)> = None;
             for h in rooms.values() {
                 if !h.summary.public || !h.summary.joinable() {
@@ -282,7 +283,7 @@ impl Hub {
 
     /// Every room anybody may walk into.
     pub fn list(&self) -> Vec<RoomBrief> {
-        let rooms = self.rooms.lock().unwrap();
+        let rooms = self.rooms.lock_safe();
         let mut out: Vec<RoomBrief> = rooms
             .values()
             .filter(|h| h.summary.public && h.summary.players.load(Ordering::Relaxed) > 0)
@@ -313,11 +314,11 @@ impl Hub {
 
     /// Called by a room task as it exits.
     pub fn forget(&self, code: &str) {
-        self.rooms.lock().unwrap().remove(code);
+        self.rooms.lock_safe().remove(code);
     }
 
     pub fn room_count(&self) -> usize {
-        self.rooms.lock().unwrap().len()
+        self.rooms.lock_safe().len()
     }
 
     pub fn player_count(&self) -> usize {
@@ -342,7 +343,7 @@ impl Hub {
             self.stats.shed.fetch_add(1, Ordering::Relaxed);
             return Err(crate::limits::Refusal::ServerFull);
         }
-        if let Err(e) = self.ips.lock().unwrap().may_request(ip, self.config.http_rate) {
+        if let Err(e) = self.ips.lock_safe().may_request(ip, self.config.http_rate) {
             self.stats.requests_refused.fetch_add(1, Ordering::Relaxed);
             return Err(e);
         }
@@ -352,7 +353,7 @@ impl Hub {
     /// Take a connection slot for `ip`, or say why not.
     pub fn admit(&self, ip: IpAddr) -> Result<(), crate::limits::Refusal> {
         let r = {
-            let mut t = self.ips.lock().unwrap();
+            let mut t = self.ips.lock_safe();
             if !t.may_connect(ip, self.config.connect_rate) {
                 // Either jailed, or opening sockets faster than any client
                 // needs to. Both answer the same way.
@@ -388,7 +389,7 @@ impl Hub {
     }
 
     pub fn release(&self, ip: IpAddr) {
-        self.ips.lock().unwrap().release(ip);
+        self.ips.lock_safe().release(ip);
     }
 
     /// Periodic housekeeping and the heartbeat log line.
@@ -399,20 +400,20 @@ impl Hub {
     /// difference between diagnosing a report and guessing at it.
     pub fn housekeeping(&self) {
         {
-            let mut s = self.sessions.lock().unwrap();
+            let mut s = self.sessions.lock_safe();
             s.sweep(self.config.session_idle);
         }
-        self.ips.lock().unwrap().sweep();
+        self.ips.lock_safe().sweep();
 
         let (sessions, connected, bans) = {
-            let s = self.sessions.lock().unwrap();
+            let s = self.sessions.lock_safe();
             (s.len(), s.connected(), s.bans())
         };
         let (addrs, live) = {
-            let t = self.ips.lock().unwrap();
+            let t = self.ips.lock_safe();
             (t.addresses(), t.total())
         };
-        let jailed = self.ips.lock().unwrap().jailed_count();
+        let jailed = self.ips.lock_safe().jailed_count();
         info!(
             uptime_s = self.uptime_s(),
             rooms = self.room_count(),
@@ -440,7 +441,7 @@ impl Hub {
 
     /// Tell every room to stand down, for a clean shutdown.
     pub async fn close_all(&self) {
-        let handles: Vec<RoomHandle> = self.rooms.lock().unwrap().values().cloned().collect();
+        let handles: Vec<RoomHandle> = self.rooms.lock_safe().values().cloned().collect();
         for h in handles {
             let _ = h.tx.send(RoomMsg::Close).await;
         }
@@ -516,7 +517,7 @@ mod tests {
             h.admit(ip).unwrap_or_else(|e| panic!("connection {i} refused: {:?}", e.as_str()));
         }
         assert!(h.admit(ip).is_err(), "the cap was not enforced");
-        assert!(!h.ips.lock().unwrap().jailed(ip), "a full house was jailed");
+        assert!(!h.ips.lock_safe().jailed(ip), "a full house was jailed");
         h.release(ip);
         assert!(h.admit(ip).is_ok(), "the released slot did not come back");
     }
@@ -535,6 +536,6 @@ mod tests {
             }
         }
         assert!(refused > 20, "a connection flood was not throttled");
-        assert!(h.ips.lock().unwrap().jailed(ip), "a flooding address was not jailed");
+        assert!(h.ips.lock_safe().jailed(ip), "a flooding address was not jailed");
     }
 }

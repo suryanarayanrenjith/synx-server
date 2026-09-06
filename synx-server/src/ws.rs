@@ -1,5 +1,6 @@
 //! WebSocket upgrade, message handling, and connection lifecycle.
 
+use crate::sync::LockExt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -113,7 +114,7 @@ pub async fn upgrade(
     // The token next: an unauthenticated socket never gets upgraded, so an
     // attacker cannot make the server hold open connections for free.
     let session = {
-        let mut reg = hub.sessions.lock().unwrap();
+        let mut reg = hub.sessions.lock_safe();
         match reg.claim(&hub.config.token_secret, &q.token) {
             Ok(s) => s,
             Err(e) => {
@@ -124,7 +125,7 @@ pub async fn upgrade(
     };
 
     if let Err(refusal) = hub.admit(ip) {
-        hub.sessions.lock().unwrap().release(session.id);
+        hub.sessions.lock_safe().release(session.id);
         return (StatusCode::SERVICE_UNAVAILABLE, refusal.as_str()).into_response();
     }
 
@@ -282,7 +283,19 @@ async fn run(socket: WebSocket, hub: Arc<Hub>, session: Session, ip: IpAddr) {
         slot: 0,
         state_bucket: Bucket::per_second(config.state_rate),
         control_bucket: Bucket::per_second(config.control_rate),
-        room_bucket: Bucket::new(0.2, 3.0),
+        // OPENING AND JOINING ROOMS.
+        //
+        // This was one token every five seconds with a burst of three, which
+        // is a sensible-looking number that turns out to be roughly the exact
+        // cost of using the lobby normally: open a room, leave, join a friend
+        // by code, leave, try again - and the fifth action inside fifteen
+        // seconds is refused with "wait a moment" for no reason the player can
+        // see. Room-cycling is not an attack worth being that tight about; the
+        // room cap and the connection limits are what actually bound it.
+        //
+        // One a second with a burst of six absorbs ordinary lobby fumbling and
+        // still costs a script far more than it costs anybody real.
+        room_bucket: Bucket::new(1.0, 6.0),
         bad_frames: 0,
         shared: shared.clone(),
     };
@@ -332,7 +345,7 @@ async fn run(socket: WebSocket, hub: Arc<Hub>, session: Session, ip: IpAddr) {
         if !keep {
             break;
         }
-        hub.sessions.lock().unwrap().touch(session.id);
+        hub.sessions.lock_safe().touch(session.id);
     }
 
     // Tell the room the seat is empty before anything else is torn down.

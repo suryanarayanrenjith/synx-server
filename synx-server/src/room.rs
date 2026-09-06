@@ -1,5 +1,6 @@
 //! Actor-style room state, race progression, and snapshot publication.
 
+use crate::sync::LockExt;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,6 +26,32 @@ use crate::validate::{self, Rules};
 /// a room is not held up by somebody who has closed the game. Their car is
 /// frozen where it was and their place is kept.
 const RECONNECT_GRACE: Duration = Duration::from_secs(25);
+
+/// How long a room may go with NOBODY connected to it before it is closed
+/// regardless of what its seats say.
+///
+/// THIS IS A SAFETY NET, NOT THE ORDINARY PATH. The ordinary path is:
+/// a socket dies, the seat is held for `RECONNECT_GRACE`, the seat is
+/// released, the room becomes empty, and `empty_room_grace` closes it. That
+/// works and it is what almost always happens.
+///
+/// What it depends on is `dropped_at` having been set - which depends on the
+/// connection task having run its cleanup, which depends on the task not
+/// having been cancelled, aborted or lost between noticing the socket was gone
+/// and saying so. Those are exactly the paths that are hard to reason about
+/// and impossible to test from the outside, and the failure they produce is
+/// the worst kind: a room that ticks forever, holds a code, counts against the
+/// room cap, and appears in the listing with players in it who left when their
+/// laptop lid closed.
+///
+/// So this asks a question that does not depend on any of that bookkeeping
+/// being correct: has anybody been reachable here recently? If the answer has
+/// been no for longer than the ordinary path could possibly take, the room is
+/// wrong and it goes. It is deliberately longer than
+/// `RECONNECT_GRACE + empty_room_grace` so that it never pre-empts a genuine
+/// reconnection - if this fires, something upstream failed, and it says so in
+/// the log at warn rather than closing quietly.
+const ABANDONED_GRACE: Duration = Duration::from_secs(75);
 
 /// What a connection sends to a room.
 pub enum RoomMsg {
@@ -97,11 +124,12 @@ pub struct RoomSummary {
 }
 
 impl RoomSummary {
+    /// There is one car, so this cannot fail to decode and does not read the
+    /// stored byte at all. The field and this accessor stay because the wire
+    /// format still carries a ruleset and the summary still publishes one; if
+    /// a second car is ever added, this is where it is decoded.
     pub fn ruleset(&self) -> Ruleset {
-        match self.ruleset.load(Ordering::Relaxed) {
-            1 => Ruleset::Rebuilt,
-            _ => Ruleset::Stock,
-        }
+        Ruleset::Stock
     }
 
     pub fn phase(&self) -> Phase {
@@ -214,6 +242,31 @@ pub struct Room {
     /// When the room became empty, for the teardown grace.
     empty_since: Option<Instant>,
 
+    /// The last time anybody in this room was actually reachable. See
+    /// `ABANDONED_GRACE`.
+    last_alive: Instant,
+
+    /// WHO THE HOST HAS THROWN OUT.
+    ///
+    /// A kick that only frees the seat is not a kick: the player it removed
+    /// still has the code, and rejoining is one click. Whatever the host was
+    /// trying to stop - a griefer, somebody blocking the road, an argument -
+    /// starts again immediately, and the host's only remaining move is to
+    /// abandon the room.
+    ///
+    /// So a kick is remembered, for the life of the room. Both identifiers are
+    /// kept because either alone is easy to shed: a session id changes the
+    /// moment somebody registers again, and a device print is a value the
+    /// client hands over and could edit. Together they are enough to make
+    /// coming back a deliberate act rather than a reflex, which is all a room
+    /// -level ban can honestly claim to be. The account-level version of this
+    /// belongs in the hub and does not exist yet.
+    ///
+    /// It is not persisted. The room is the scope, exactly as the host would
+    /// expect: close the room and the slate is clean.
+    banned_sessions: std::collections::HashSet<u64>,
+    banned_devices: std::collections::HashSet<String>,
+
     /// Rotated between races so the inside of the grid is not always the same
     /// player's.
     grid_offset: u8,
@@ -256,6 +309,9 @@ impl Room {
             first_finish: None,
             results_until: None,
             empty_since: Some(Instant::now()),
+            last_alive: Instant::now(),
+            banned_sessions: std::collections::HashSet::new(),
+            banned_devices: std::collections::HashSet::new(),
             grid_offset: 0,
             snap_buf: vec![0u8; synx_net::MAX_SERVER_FRAME],
             races_run: 0,
@@ -401,6 +457,18 @@ impl Room {
             return;
         }
 
+        // Checked BEFORE the phase and the free seat, so a removed player is
+        // told the same thing whether or not the room happens to be full or
+        // racing at that moment. A refusal that changes its wording depending
+        // on what else is going on reads as a glitch worth retrying.
+        if self.banned_sessions.contains(&req.session)
+            || (!req.device.is_empty() && self.banned_devices.contains(&req.device))
+        {
+            info!(room = %self.code, session = req.session, "a removed player tried to come back");
+            let _ = req.reply.send(Err("the host removed you from that room"));
+            return;
+        }
+
         if !matches!(self.phase, Phase::Lobby | Phase::Results) {
             let _ = req.reply.send(Err("that race has already started"));
             return;
@@ -428,6 +496,7 @@ impl Room {
             self.host = slot;
         }
         self.empty_since = None;
+        self.publish_count();
         let _ = req.reply.send(Ok(slot));
         info!(
             room = %self.code,
@@ -482,9 +551,21 @@ impl Room {
         self.release(slot, "left");
     }
 
+    /// Publish the seat count the room browser reads.
+    ///
+    /// Called the instant the count changes rather than only on the next tick.
+    /// The lobby list is polled, so a count that waits for a tick is a count
+    /// that can be a quarter of a second stale - which is exactly long enough
+    /// for somebody who just left a room to watch the list still claim they
+    /// are in it, and conclude that leaving did not work.
+    fn publish_count(&self) {
+        self.summary.players.store(self.occupied(), Ordering::Relaxed);
+    }
+
     /// Empty a seat for good.
     fn release(&mut self, slot: u8, why: &'static str) {
         let Some(p) = self.players[slot as usize].take() else { return };
+        self.publish_count();
         info!(room = %self.code, slot, name = %p.name, why, players = self.occupied(), "seat released");
         self.notice("left", format!("{} left", p.name));
         if self.occupied() == 0 {
@@ -556,7 +637,7 @@ impl Room {
                         .map(|p| (p.session, p.device.clone()))
                         .unwrap_or_default();
                     let out = {
-                        let mut reg = self.hub.sessions.lock().unwrap();
+                        let mut reg = self.hub.sessions.lock_safe();
                         reg.strike(session, strikes, strikes_budget * 3)
                     };
                     warn!(
@@ -640,25 +721,12 @@ impl Room {
                 self.notice("map", format!("route: {}", self.map().name));
                 self.broadcast_room();
             }
-            ClientMsg::Ruleset { ruleset } => {
-                if !is_host {
-                    return self.err(slot, "not-host", "only the host can change the car");
-                }
-                if self.phase != Phase::Lobby {
-                    return self.err(slot, "racing", "the car cannot change mid-race");
-                }
-                let Some(r) = Ruleset::from_str(&ruleset) else {
-                    return self.err(slot, "bad-ruleset", "there is no such car");
-                };
-                if self.ruleset == r {
-                    return;
-                }
-                self.ruleset = r;
-                self.summary.ruleset.store(r as u8, Ordering::Relaxed);
-                self.clear_ready();
-                info!(room = %self.code, ruleset = r.label(), "car changed");
-                self.notice("ruleset", format!("car: {}", r.label()));
-                self.broadcast_room();
+            /* THE CAR IS NOT A SETTING. See maps::Ruleset for why there is
+               only one. The message is still answered rather than dropped, so
+               an older client that still shows the control gets told why the
+               button did nothing instead of appearing to have been ignored. */
+            ClientMsg::Ruleset { .. } => {
+                self.err(slot, "one-car", "everybody races the same stock car here");
             }
             ClientMsg::Start {} => {
                 if !is_host {
@@ -673,8 +741,17 @@ impl Room {
                 if target == slot || self.player(target).is_none() {
                     return;
                 }
-                let name = self.player(target).map(|p| p.name.clone()).unwrap_or_default();
-                info!(room = %self.code, target, %name, "kicked by the host");
+                let (name, session, device) = match self.player(target) {
+                    Some(p) => (p.name.clone(), p.session, p.device.clone()),
+                    None => return,
+                };
+                // Remembered before the seat is freed, because `release` drops
+                // the player and with it the only copy of who they were.
+                self.banned_sessions.insert(session);
+                if !device.is_empty() {
+                    self.banned_devices.insert(device);
+                }
+                info!(room = %self.code, target, %name, session, "kicked by the host; barred from returning");
                 self.say_to(target, ServerMsg::Bye {
                     code: "kicked",
                     message: "the host removed you from the room".into(),
@@ -724,7 +801,32 @@ impl Room {
         let host_name = self.player(self.host).map(|p| p.name.clone()).unwrap_or_default();
         let waiting: Vec<String> = unready.into_iter().filter(|n| *n != host_name).collect();
         if !waiting.is_empty() {
-            return self.err(by, "not-ready", &format!("waiting for {}", waiting.join(", ")));
+            /* THE HOST IS NOT THE PERSON WHO CAN FIX THIS.
+             *
+             * Only the host was told, which put the message on the one screen
+             * where it could not be acted on: the host reads "waiting for
+             * SURYA", and SURYA - who has to press READY - sees nothing at all
+             * and does not know they are being waited for. Everybody in the
+             * room now hears that the start was attempted, and the people
+             * holding it up are told directly and by name. */
+            let names = waiting.join(", ");
+            self.notice("start-blocked", format!("{host_name} tried to start — waiting for {names}"));
+            let stuck: Vec<u8> = self
+                .players
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| {
+                    let p = p.as_ref()?;
+                    (p.link.is_some() && !p.ready && p.name != host_name).then_some(i as u8)
+                })
+                .collect();
+            for slot in stuck {
+                self.say_to(slot, ServerMsg::Notice {
+                    kind: "you-are-blocking",
+                    text: "The host is trying to start. Say READY.".into(),
+                });
+            }
+            return self.err(by, "not-ready", &format!("waiting for {names}"));
         }
         self.begin_countdown();
     }
@@ -868,6 +970,31 @@ impl Room {
     /// One tick. Returns true when the room should close.
     fn tick(&mut self) -> bool {
         let now = Instant::now();
+
+        /* ---- is anybody actually here? -----------------------------------
+         *
+         * Asked first, and asked of the links rather than of the seats,
+         * because a seat is bookkeeping and a link is a fact. Everything below
+         * this point - held seats, the empty-room grace, the race itself -
+         * trusts that bookkeeping; this is the one check that does not.
+         *
+         * See ABANDONED_GRACE for why it exists and why reaching it is worth a
+         * warning rather than a quiet close. */
+        if self.connected() > 0 {
+            self.last_alive = now;
+        } else if now.duration_since(self.last_alive) > ABANDONED_GRACE {
+            warn!(
+                room = %self.code,
+                seats = self.occupied(),
+                phase = ?self.phase,
+                abandoned_s = now.duration_since(self.last_alive).as_secs(),
+                "nobody has been reachable in this room for longer than the ordinary \
+                 teardown could take; closing it. The seats above should already have \
+                 been released - that they were not means a connection did not report \
+                 its own end."
+            );
+            return true;
+        }
 
         // ---- seats held for players who have not come back ----------------
         let mut expired: Vec<u8> = Vec::new();
@@ -1067,9 +1194,34 @@ impl Room {
 
     fn broadcast(&mut self, msg: ServerMsg) {
         let Ok(text) = serde_json::to_string(&msg) else { return };
+
+        /* Who can actually receive it.
+         *
+         * This used to clone the encoded message once per SEAT and hand it to
+         * `send_text`, which then dropped it again for any seat that was empty
+         * or whose socket had gone. A room with one player in it therefore
+         * allocated and freed three copies of every notice to deliver one, and
+         * the last recipient got a clone of a string that was about to be
+         * dropped anyway.
+         *
+         * A fixed array rather than a Vec, because MAX_PLAYERS is four and a
+         * heap allocation to avoid three is not a trade. */
+        let mut to = [0u8; MAX_PLAYERS];
+        let mut n = 0usize;
         for i in 0..MAX_PLAYERS {
-            self.send_text(i as u8, text.clone());
+            if self.players[i].as_ref().is_some_and(|p| p.link.is_some()) {
+                to[n] = i as u8;
+                n += 1;
+            }
         }
+        if n == 0 {
+            return;
+        }
+        // Everybody but the last gets a copy; the last takes the original.
+        for &slot in &to[..n - 1] {
+            self.send_text(slot, text.clone());
+        }
+        self.send_text(to[n - 1], text);
     }
 
     fn notice(&mut self, kind: &'static str, text: String) {
@@ -1164,6 +1316,45 @@ mod tests {
         // 4,000 draws from 887 million: a handful of collisions would be
         // extraordinary, and zero is the expected result
         assert!(seen.len() > 3_990, "only {} unique codes in 4000", seen.len());
+    }
+
+    /* THE BAN SET.
+     *
+     * Testing this through a whole `Room` would need a hub, a course and a
+     * tokio runtime, and would be testing the plumbing rather than the rule.
+     * The rule is the two sets and the condition `on_join` reads them with,
+     * which is what these pin. */
+    fn barred(sessions: &std::collections::HashSet<u64>,
+              devices: &std::collections::HashSet<String>,
+              session: u64, device: &str) -> bool {
+        sessions.contains(&session) || (!device.is_empty() && devices.contains(device))
+    }
+
+    #[test]
+    fn a_removed_player_is_barred_by_either_identifier() {
+        let mut sessions = std::collections::HashSet::new();
+        let mut devices = std::collections::HashSet::new();
+        sessions.insert(7u64);
+        devices.insert("device-a".to_string());
+
+        // The session they were kicked on.
+        assert!(barred(&sessions, &devices, 7, "device-a"));
+        // Registering again gets a new session id - the device still catches it.
+        assert!(barred(&sessions, &devices, 99, "device-a"));
+        // ...and editing the device print still leaves the session id.
+        assert!(barred(&sessions, &devices, 7, "device-b"));
+        // Somebody else entirely walks in.
+        assert!(!barred(&sessions, &devices, 99, "device-b"));
+    }
+
+    /// An absent device print must not match the empty strings of everybody
+    /// else who did not send one - that would ban the whole room at once.
+    #[test]
+    fn an_empty_device_print_never_matches() {
+        let sessions = std::collections::HashSet::new();
+        let mut devices = std::collections::HashSet::new();
+        devices.insert(String::new());
+        assert!(!barred(&sessions, &devices, 1, ""));
     }
 
     #[test]

@@ -5,11 +5,32 @@
 resolver = "2"
 members = ["protocol", "synx-server"]
 
-# Optimize the release binary for deployment.
+# THE DEPLOYED BINARY.
+#
+# This is built once, in CI or in the Dockerfile, and then run for weeks. That
+# asymmetry is what decides every value here: build time is nearly free and
+# run time is not, so everything is turned up.
 [profile.release]
 opt-level = 3
-lto = "thin"
+# Fat rather than thin. Thin LTO optimises within each codegen unit and only
+# summarises across them; fat inlines across the whole graph, which is what
+# the hot path here actually needs - the validator and the quantisation live
+# in the protocol crate and are called from the room's tick in this one, so
+# every cross-crate call is on the twenty-times-a-second path. It costs about
+# a minute of build time and nothing at run time.
+lto = "fat"
+# One unit, so the optimiser sees the whole crate at once. Redundant beside
+# fat LTO for cross-crate work and still worth having within the crate.
 codegen-units = 1
-# Keep panics isolated to their tasks where possible.
+# UNWIND, DELIBERATELY, and not the smaller/faster `abort`.
+#
+# Each room is a supervised task: `hub.rs` joins it and reclaims the room if it
+# panicked, so one bad room recovers instead of taking the server with it. That
+# recovery is only possible because the panic unwinds. `abort` would trade a
+# recoverable one-room fault for a process-wide outage to save a few kilobytes.
 panic = "unwind"
 strip = true
+# No unwind tables for a debugger nobody will attach to a container, and one
+# fewer thing in the image.
+debug = false
+incremental = false
