@@ -6,29 +6,25 @@ description = "SYNX multiplayer server: lobbies, an authoritative race director 
 default-run = "synx-server"
 
 [dependencies]
-# The wire format, shared byte for byte with the game.
+# Shared binary wire protocol.
 synx-net = { path = "../protocol" }
 
-# HTTP and WebSocket. axum is the thinnest thing that gives routing, extractors
-# and a WebSocket upgrade over hyper without dragging a framework in behind it.
+# HTTP and WebSocket server.
 axum = { version = "0.8", features = ["ws", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "limit", "timeout"] }
-# Splitting the WebSocket into a reader and a writer, which is what lets the
-# two run as independent tasks.
+# Async WebSocket stream utilities.
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
-# Structured logging. The whole server is verbose by design - see main.rs.
+# Structured logging.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
 
-# Lobby control messages only. The per-frame path is binary and never sees this.
+# Lobby control messages.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Session tokens: a SHA-256 HMAC over a payload the server signs and verifies.
-# RustCrypto rather than a hand-rolled one, because a hand-rolled MAC is the
-# one piece of this that cannot be reviewed by reading it.
+# Session token signing and encoding.
 sha2 = "0.10"
 hmac = "0.12"
 rand = "0.8"

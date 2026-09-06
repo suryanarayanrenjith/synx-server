@@ -1,41 +1,4 @@
-//! Turning the simulation's `f64`s into the smallest field that still holds
-//! them, and back.
-//!
-//! # Why quantise at all
-//!
-//! Not to save bandwidth. Four cars of raw `f64` would be about 1.5 kB a
-//! snapshot, which at twenty snapshots a second is 30 kB/s down - large, but
-//! survivable. The reason is the segment.
-//!
-//! A snapshot that fits in one TCP segment is delivered as one thing. A
-//! snapshot that spans two waits for the slower of them, and on a lossy link
-//! waits for a retransmission of a half it did not need. Quantising to the
-//! precision the game can actually show puts a full four-car snapshot at
-//! 197 bytes - comfortably inside the 1460-byte payload of an ordinary
-//! segment, with the WebSocket header and room to spare.
-//!
-//! # How the precisions were chosen
-//!
-//! Each one is the coarsest step that is invisible in the frame it ends up in,
-//! measured rather than guessed:
-//!
-//! | field      | encoding      | step             | why that is enough              |
-//! |------------|---------------|------------------|---------------------------------|
-//! | position   | `f32`         | ~4 mm at 50 km   | under a millimetre on screen    |
-//! | arc length | `f32`         | ~15 mm at 129 km | the road is 29 m wide           |
-//! | angles     | `i16` over pi | 0.0055 deg       | a wheel turns 30 deg lock to lock |
-//! | velocity   | `i16` / 128   | 0.008 u/s        | top speed is 122 u/s            |
-//! | yaw rate   | `i16` / 4096  | 0.00024 rad/s    | the solver clamps to 3.6 rad/s  |
-//! | lateral    | `i16` / 256   | 3.9 mm           | the corridor is 36 m across     |
-//! | 0..1 knobs | `u8`          | 0.4%             | they drive a lamp or a meter    |
-//!
-//! # Saturating, never wrapping
-//!
-//! Every encoder clamps. An `as i16` cast of an out-of-range float in Rust is
-//! a saturating cast, but relying on that would leave a car that somehow
-//! reached 300 u/s appearing at the far edge of the range rather than at the
-//! near one, and the arithmetic that reads it would be wrong in a way that
-//! looks like a physics bug. Clamping first states the intent.
+//! Quantization helpers for compact network state encoding.
 
 use core::f32::consts::PI;
 

@@ -1,17 +1,4 @@
-//! Bounds-checked little-endian cursors.
-//!
-//! Everything this crate decodes came off a socket, so the decoder is a
-//! security boundary and not a convenience. Two rules make it one:
-//!
-//!   NOTHING PANICS.  Every read returns `Result`. `slice[i]` on a short buffer
-//!   is an abort in the WebAssembly build and a thread kill in the server, and
-//!   in both cases a two-byte packet from anybody on the internet would be
-//!   enough to cause it.
-//!
-//!   NOTHING ALLOCATES.  The reader borrows the caller's buffer and the writer
-//!   fills a caller-owned slice. There is no length field anywhere in this
-//!   format that is used to size an allocation, which is the other half of the
-//!   same class of bug.
+//! Bounds-checked little-endian readers and writers for received frames.
 
 use core::fmt;
 

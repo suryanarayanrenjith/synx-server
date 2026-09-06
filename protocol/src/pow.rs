@@ -1,35 +1,4 @@
-//! SHA-256, and the proof of work built on it.
-//!
-//! # Why this is here and not a crate
-//!
-//! The client half of this protocol compiles to WebAssembly inside
-//! `synx-core`, which has no dependencies at all - the whole point of that
-//! crate is that it is a plain `cdylib` with a hand-written C ABI and no build
-//! step. Pulling `sha2` in would add a dependency tree to the game's
-//! simulation core so that a registration screen can hash sixty-five thousand
-//! strings once.
-//!
-//! So the hash lives here, in the `no_std` crate both halves already share.
-//! The server uses it for the same proof of work, which means there is exactly
-//! one implementation and the two ends cannot disagree about what a valid
-//! solution is. It is checked against the NIST vectors below, and the server
-//! additionally checks it against `sha2` - so "our SHA-256 is subtly wrong"
-//! fails a test rather than becoming a registration nobody can complete.
-//!
-//! This is NOT a general-purpose crypto primitive and should not be used as
-//! one. It hashes a short, server-issued challenge and a counter. The thing
-//! that actually needs to be unforgeable - the session token - is an HMAC the
-//! server computes with an audited implementation, and the client never
-//! verifies it.
-//!
-//! # What the proof of work buys
-//!
-//! Not security: a determined attacker can spend the CPU. What it buys is
-//! COST. Registering an identity stops being free, so churning through them to
-//! evade a kick scales with how hard somebody is willing to work, which is the
-//! only lever available when every fact a client reports about itself can be
-//! made up. Sixteen bits is about 65,000 hashes: a few milliseconds in
-//! WebAssembly, and a real bill for anybody wanting ten thousand identities.
+//! Minimal SHA-256 implementation used by the registration proof of work.
 
 /// The standard round constants.
 const K: [u32; 64] = [

@@ -1,22 +1,4 @@
-//! The road, as the server knows it.
-//!
-//! The server does not simulate cars. What it does is decide whether a
-//! position a client claims is a position a car could be in, and every one of
-//! those questions is a question about the road: is this inside the barriers,
-//! is this at the height of the tarmac, has this car actually driven the
-//! distance it says it has. So the server needs the centreline, and only the
-//! centreline.
-//!
-//! It is not generated here. `mkcourse` emits `assets/course.bin` from the
-//! game's own course generator and the game's own shipped centreline, and this
-//! reads it. That is deliberate on two counts: the server cannot drift from
-//! the road the game is driving, and starting up does not spend a second
-//! generating twenty-nine thousand samples it could have read.
-//!
-//! The file is `include_bytes!`d rather than opened, so there is no path to
-//! get wrong, nothing to mount, and no way for the binary and its data to be
-//! deployed out of step. Half a megabyte of read-only data costs nothing that
-//! matters.
+//! Course centerline data used by the server's validation rules.
 
 use std::f32::consts::PI;
 

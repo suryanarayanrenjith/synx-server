@@ -1,36 +1,4 @@
-//! The messages themselves.
-//!
-//! Encoder and decoder for each one live side by side, and every one has a
-//! round-trip test at the bottom of the file. That pairing is the whole
-//! defence against the two ends of this protocol drifting apart: you cannot
-//! change a field without the function three lines below it going red.
-//!
-//! # The shape of a frame
-//!
-//! ```text
-//!   STATE       0x01 | seq:u16 | body:40                         =  43 bytes
-//!   TIME_REQ    0x02 | client_ms:u32                             =   5 bytes
-//!   PONG        0x03 | nonce:u32                                 =   5 bytes
-//!
-//!   SNAPSHOT    0x81 | n:u8 | flags:u8 | t:u32 | n x entry:44     = 183 at n=4
-//!   CORRECTION  0x82 | reason:u8 | body:40                        =  42 bytes
-//!   TIME        0x83 | echo:u32 | server_ms:u32                   =   9 bytes
-//!   PING        0x84 | nonce:u32                                  =   5 bytes
-//! ```
-//!
-//! # Why the body carries a timestamp
-//!
-//! Each car in a snapshot was sampled at a different moment - four clients
-//! sending at thirty hertz never line up - so a snapshot is not an instant, it
-//! is four instants collected into one frame. Interpolating them against a
-//! single frame time would put every car a different, unknown amount of time
-//! in the past.
-//!
-//! So the timestamp travels with the car rather than with the frame, and the
-//! server rewrites it on the way through to the moment on ITS clock that it
-//! accepted the state. That gives the receiving client one timeline, owned by
-//! one clock, with each car correctly placed on it - which is what makes the
-//! interpolation in `synx-core::net` correct rather than approximately right.
+//! Message definitions and codecs for the SYNX wire protocol.
 
 use crate::quant::{
     deq_byte, deq_lateral, deq_rate, deq_unit, deq_vel, q_angle, q_byte, q_lateral, q_rate,

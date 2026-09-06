@@ -1,39 +1,4 @@
-//! One room: up to four cars, one route, and the race director that owns them.
-//!
-//! # Why a room is a task and not a lock
-//!
-//! The obvious shape is a `Mutex<Room>` that every connection reaches into.
-//! It is also the shape that produces the two bugs that are hardest to find in
-//! a game server: a lock held across an `await` (which stalls every player in
-//! the room behind the slowest socket), and two connections observing the room
-//! in an order neither of them can reason about.
-//!
-//! So a room is an actor. It owns its state outright, it is reached only
-//! through a channel, and everything that happens to it happens in the order
-//! it arrived - which means the race director is ordinary single-threaded code
-//! with no locking in it at all, and the only concurrency in the whole file is
-//! the channel at the front door.
-//!
-//! # Why snapshots go out through a `watch`
-//!
-//! This is the single most important decision in the server, so it is worth
-//! being explicit. The transport is TCP. If a player's connection stalls -
-//! a phone changing cell, a congested link - and the server keeps queueing
-//! snapshots for them, then when the stall clears they receive a burst of
-//! states that are all out of date, in order, slowly. They see the last two
-//! seconds of the race played back at them before catching up. That is the
-//! classic failure of a game on a reliable transport and it is entirely
-//! self-inflicted.
-//!
-//! A [`tokio::sync::watch`] holds exactly one value and overwrites it. A
-//! writer that is keeping up sends every snapshot; a writer that is behind
-//! silently skips to the newest one, which is the only one worth having. The
-//! protocol is designed for that - every snapshot is complete and depends on
-//! no other - and the two decisions only work together.
-//!
-//! Control messages (the lobby, the results, a correction) go on a separate
-//! bounded channel, because those are not state and losing one is not
-//! recoverable.
+//! Actor-style room state, race progression, and snapshot publication.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;

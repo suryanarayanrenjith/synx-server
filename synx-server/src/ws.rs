@@ -1,34 +1,4 @@
-//! One WebSocket connection, from upgrade to close.
-//!
-//! # The shape
-//!
-//! Two tasks per connection and no locks between them.
-//!
-//!   THE READER owns the socket's receive half. It decodes, meters and routes
-//!   whatever arrives. It never blocks on anything except the socket.
-//!
-//!   THE WRITER owns the send half. It waits on three things: the reliable
-//!   control channel, the latest-wins snapshot slot, and a ping timer. It is
-//!   the only thing that ever writes to the socket, which is what makes
-//!   "overwrite the pending snapshot" safe to do from a room task.
-//!
-//! # What a hostile client can do, and what happens
-//!
-//! | it does                          | it gets                                |
-//! |----------------------------------|----------------------------------------|
-//! | connects without a token         | 401 at the upgrade                     |
-//! | forges a token                   | 401: the MAC does not verify           |
-//! | reuses somebody else's token     | refused: a session is singular         |
-//! | opens two hundred sockets        | refused at the per-address cap         |
-//! | sends a 40 MB frame              | dropped, connection closed             |
-//! | sends state at 10 kHz            | metered, then closed                   |
-//! | sends malformed binary           | dropped, metered as an error           |
-//! | sends valid JSON of the wrong kind | one error message, no state change   |
-//! | goes quiet                       | closed after the ping timeout          |
-//! | stops reading                    | closed once its channel backs up       |
-//!
-//! Every one of those is a bounded amount of work for the server. That is the
-//! whole design goal of this file.
+//! WebSocket upgrade, message handling, and connection lifecycle.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};

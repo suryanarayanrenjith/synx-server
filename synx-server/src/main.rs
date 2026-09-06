@@ -1,37 +1,4 @@
-//! SYNX multiplayer server.
-//!
-//! Lobbies of four, seven routes, an authoritative race director and a
-//! physics-envelope validator.
-//!
-//! # The map
-//!
-//! ```text
-//!   main.rs       this: boot, logging, routing, shutdown
-//!   config.rs     everything tunable, from the environment
-//!   course.rs     the road, read from an asset the game's own core emitted
-//!   maps.rs       the seven routes and the physical envelope of a car
-//!   identity.rs   names, device prints, proof of work, session tokens
-//!   limits.rs     token buckets and per-address caps
-//!   control.rs    the lobby protocol (JSON)
-//!   validate.rs   is that a position a car could be in?
-//!   room.rs       one lobby and one race, as an actor
-//!   hub.rs        the registry of rooms and sessions
-//!   ws.rs         one connection, from upgrade to close
-//!   api.rs        health, wake, registration, diagnostics
-//! ```
-//!
-//! # Why it is this verbose
-//!
-//! When somebody reports that a race ended strangely, the only evidence that
-//! will ever exist is what was written to standard output while it was
-//! happening. There is nothing to reproduce it on and nothing to attach a
-//! debugger to.
-//!
-//! So the server says what it is doing: every room opening and closing, every
-//! player joining and leaving, every race starting with its grid and finishing
-//! with its order, every refused state with the reason, and a heartbeat every
-//! minute with the shape of the whole process. `RUST_LOG` turns the volume up
-//! or down; the default is the level that makes a bug report answerable.
+//! SYNX multiplayer server entry point and route setup.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

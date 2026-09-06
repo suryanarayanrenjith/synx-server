@@ -1,20 +1,4 @@
-//! The registry: every room, every session, and who is allowed in.
-//!
-//! The hub is the only shared mutable thing in the server, and it is
-//! deliberately small and deliberately boring. It holds three short-lived
-//! locks - the room table, the session registry and the address table - and it
-//! never holds any of them across an `await`. Everything expensive happens
-//! inside a room, where there is no locking at all.
-//!
-//! # Sizing
-//!
-//! The defaults refuse the twenty-fifth room and the ninety-seventh
-//! connection. Those are not limits of the design - the same code holds
-//! thousands given the cores to do it - they are the point at which one small
-//! instance stops being able to give everybody a good race. A ceiling that is
-//! reached and enforced means one person sees "the grid is full" and everybody
-//! already racing is unaffected; a ceiling that is not there means everybody
-//! gets a worse game at once.
+//! Shared registry for rooms, sessions, addresses, and server statistics.
 
 use std::collections::HashMap;
 use std::net::IpAddr;

@@ -1,21 +1,4 @@
-//! The lobby protocol: JSON, on the WebSocket's text channel.
-//!
-//! # Why this half is not binary
-//!
-//! The rest of the protocol is hand-packed bytes because it runs sixty times a
-//! second and a byte matters. This half runs about eight times per player per
-//! session - join a room, pick a map, say ready, start - so the same reasoning
-//! points the other way: JSON is self-describing, it is trivially inspectable
-//! in a browser's network panel when something is wrong at two in the morning,
-//! and a new optional field does not need a protocol version bump.
-//!
-//! The cost is a parser on untrusted input, which is answered where it should
-//! be: a hard 1 kB frame cap before the parser is reached, `deny_unknown_fields`
-//! so a padded message is refused rather than ignored, a token bucket on the
-//! whole class, and every string bounded on the way out of it.
-//!
-//! WebSockets carry text and binary as distinct frame types, so the two halves
-//! never have to be told apart by looking at them - the transport already knows.
+//! JSON lobby messages carried on the WebSocket text channel.
 
 use serde::{Deserialize, Serialize};
 

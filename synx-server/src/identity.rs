@@ -1,45 +1,4 @@
-//! Who is connecting: names, device prints, proof of work and session tokens.
-//!
-//! # What this can and cannot do
-//!
-//! It is worth being exact, because the honest version of this is useful and
-//! the overclaimed version is a false sense of security.
-//!
-//! NOTHING A CLIENT REPORTS ABOUT ITSELF CAN BE TRUSTED. The platform string,
-//! the core count, the GPU name, the install id - every one of them is a value
-//! the game hands over, and anybody willing to edit the game can hand over a
-//! different one. There is no fingerprint, on any platform, that a determined
-//! user cannot change. A design that depends on one is broken.
-//!
-//! WHAT IS ACTUALLY ENFORCED is the part the server owns:
-//!
-//!   THE TOKEN IS UNFORGEABLE. It is signed with a per-process HMAC key, so a
-//!   client cannot mint one, extend one, or promote one - the only way to hold
-//!   a valid token is to have been given it.
-//!
-//!   A SESSION IS SINGULAR. One live WebSocket per session, enforced in the
-//!   registry. Handing your token to nine friends gets you one connection
-//!   between you, not nine.
-//!
-//!   MINTING ONE COSTS SOMETHING. Registration is behind a proof of work and a
-//!   per-address rate limit, so churning identities to evade a kick is
-//!   expensive in a way that scales with how hard somebody tries.
-//!
-//!   THE PRINT IS A HANDLE, NOT A PROOF. The device hash is what a strike, a
-//!   kick or a ban is attached to for the life of the process. It raises the
-//!   cost of coming back from "reconnect" to "work out which of eleven fields
-//!   is being hashed and change it", which is the actual, achievable goal.
-//!
-//! # Why none of it is persisted
-//!
-//! The instance this runs on has an ephemeral filesystem, no attached disk,
-//! and is restarted whenever the host feels like it - so a session store on
-//! disk would be a store that silently empties. Rather than pretend otherwise,
-//! sessions are explicitly per-process: the signing key is generated at boot,
-//! every token dies with the instance, and the client is built to notice a
-//! rejected token and register again without the player seeing anything but a
-//! moment on the connecting screen. That is a smaller, truthful system instead
-//! of a larger one with a hole in it.
+//! Identity registration, proof of work, device handles, and session tokens.
 
 use std::collections::HashMap;
 use std::net::IpAddr;

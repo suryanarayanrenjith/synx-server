@@ -1,17 +1,4 @@
-//! The HTTP surface: health, waking up, registration and diagnostics.
-//!
-//! # The wake endpoint
-//!
-//! A cold process takes time to become useful, and a player who has just
-//! pressed MULTIPLAYER should not be the one who waits for it. `/wake` exists
-//! so the game can announce its intention early - it is called the moment the
-//! multiplayer tile comes into view rather than when a socket is needed - and
-//! it is deliberately the cheapest thing in the process: no lock, no work, and
-//! no allocation beyond the response.
-//!
-//! The response carries `uptime_s` as well as `ready`, so the interface can
-//! tell "this instance has been up for hours" from "this instance started two
-//! seconds ago because of me" and say something true about the wait.
+//! HTTP endpoints for health, sessions, rooms, and diagnostics.
 
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;

@@ -1,10 +1,4 @@
-//! Everything that can be turned without a rebuild.
-//!
-//! All of it comes from the environment, all of it has a default that is right
-//! for a small single instance, and all of it is logged at boot - because the
-//! most annoying class of production problem is a setting that is not what you
-//! think it is, and the cheapest fix is to print the whole table on the way
-//! up.
+//! Environment-backed server configuration and defaults.
 
 use std::time::Duration;
 

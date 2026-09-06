@@ -1,18 +1,4 @@
-//! Rate limiting, and the counters that keep one client from being everybody.
-//!
-//! # The threat this answers
-//!
-//! Everything else in this server is bounded by design: a room holds four
-//! players, a snapshot is 183 bytes, a state packet is 43. The one thing a
-//! client controls without limit is HOW OFTEN it does something, and that is
-//! the whole attack surface. A client that sends state at ten thousand hertz
-//! costs three hundred times what it should, and it does not need to be
-//! malicious to do it - a bug in a fork of the game will do.
-//!
-//! So every inbound message class is metered, and the meter is a token bucket
-//! rather than a counter-per-window: a bucket admits a short burst (which is
-//! what ordinary jitter looks like) and refuses a sustained overload (which is
-//! what an attack looks like), and it costs two floats and no allocation.
+//! Rate limiting and per-address connection counters.
 
 use std::collections::HashMap;
 use std::net::IpAddr;

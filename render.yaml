@@ -1,10 +1,4 @@
-# Render blueprint for the SYNX multiplayer server.
-#
-#   Root Directory   .
-#   Runtime          Docker
-#   Health Check     /healthz
-#
-# The repository root contains the Dockerfile and the complete Rust workspace.
+# Render deployment configuration for the SYNX server.
 services:
   - type: web
     name: synx-multiplayer
@@ -18,8 +12,7 @@ services:
     envVars:
       # PORT is injected by Render.
 
-      # Signs session tokens. Generated and kept by Render, so a redeploy does
-      # not invalidate every open session on top of restarting the process.
+      # Secret used to sign session tokens.
       - key: SYNX_TOKEN_SECRET
         generateValue: true
 

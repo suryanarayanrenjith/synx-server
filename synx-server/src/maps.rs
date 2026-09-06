@@ -1,29 +1,4 @@
-//! The seven routes, and the physical envelope a car on one of them has.
-//!
-//! # Where these numbers come from
-//!
-//! Every one of them is copied from somewhere in the game and is a fact about
-//! it rather than a choice made here:
-//!
-//!   the arc lengths   `LEVELS` in `web/js/game.js`
-//!   the corridors     `ROAD_HALF`/`DRIVE_HALF` in `crates/synx-core/src/track.rs`,
-//!                     with Neon Horizon's override from its `LEVELS` entry
-//!   the speeds        the engine constants in `crates/synx-core/src/vehicle.rs`
-//!
-//! They are duplicated rather than shared because the server must not depend on
-//! the game core - see `course.rs` for why - so the risk of drift is real and
-//! is answered the only honest way available: the test at the bottom of this
-//! file asserts every route lies inside the course the server actually loaded,
-//! and `tools/checkmaps.js` diffs this table against `web/js/game.js` in the
-//! build. A number changed in one place and not the other fails the build.
-//!
-//! # Why the envelope matters
-//!
-//! The server does not simulate the car, so its entire notion of "that is not
-//! possible" is this table. A ceiling that is too generous is a speed hack that
-//! goes unnoticed; one that is too tight corrects an honest player on a
-//! downhill. Both are stated precisely rather than padded, and the tolerance
-//! that absorbs jitter is applied once, in `validate.rs`, where it can be seen.
+//! Route definitions and physical limits used by validation.
 
 use serde::Serialize;
 
