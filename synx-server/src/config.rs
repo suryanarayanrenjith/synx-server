@@ -1,4 +1,26 @@
-//! Environment-backed server configuration and defaults.
+//! Server configuration.
+//!
+//! WHY THERE IS ALMOST NOTHING HERE TO SET.
+//!
+//! This server is meant to be cloned and run by anybody who wants their own
+//! grid, which puts a hard requirement on this file: `git clone`, `cargo run`,
+//! and you have a working server. Every variable that has to be set before
+//! that works is a step somebody can get wrong, and every tuning knob that
+//! nobody will ever turn is a decision the reader has to rule out while
+//! looking for the two that matter.
+//!
+//! So there are two, and both exist because the environment genuinely differs
+//! between deployments rather than because the value is arguable:
+//!
+//!   PORT                  the host picks it - Render, Fly and Railway all
+//!                         assign one and expect the process to obey.
+//!   SYNX_ALLOWED_ORIGINS  who may connect, if you serve the game from your
+//!                         own domain rather than the desktop build.
+//!
+//! Everything else below is a constant. They were environment variables once,
+//! and the tuning that produced these numbers is written beside each one so
+//! that changing a value is an informed edit to a named constant rather than
+//! an undocumented variable set in a dashboard nobody else can see.
 
 use std::time::Duration;
 
@@ -28,10 +50,11 @@ fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
 /// loopback entries are for running the game against `python -m http.server`
 /// during development, which is how the harness drives it.
 ///
-/// A native process can of course send whatever `Origin` it likes, so this list
-/// is not what stops a hand-written client - that is what attestation is for.
-/// What it does stop is any web page, anywhere, using this server: the browser
-/// sets that header itself and will not let a script change it.
+/// A native process can send whatever `Origin` it likes, so this list is not
+/// what stops a hand-written client, and nothing here pretends otherwise. What
+/// it does stop is any web PAGE, anywhere, quietly using this server as free
+/// infrastructure: a browser sets that header itself and will not let a script
+/// change it. That is a narrow guarantee, and it is a real one.
 pub const DEFAULT_CLIENT_ORIGINS: &[&str] = &[
     "tauri://localhost",
     "http://tauri.localhost",
@@ -39,32 +62,6 @@ pub const DEFAULT_CLIENT_ORIGINS: &[&str] = &[
     "http://localhost",
     "http://127.0.0.1",
 ];
-
-/// Parse `major.minor.patch`, ignoring anything before the first digit so that
-/// both "1.2.3" and "synx 1.2.3" are read the same way.
-///
-/// A version that will not parse is treated as absent rather than as zero: a
-/// floor nobody can satisfy would lock every client out, and a floor of zero
-/// would silently admit everything. Neither is a good failure, so an
-/// unparseable one simply is not a floor.
-pub fn parse_version(raw: &str) -> Option<(u32, u32, u32)> {
-    let digits = raw.trim_start_matches(|c: char| !c.is_ascii_digit());
-    let mut it = digits.split('.');
-    let major = it.next()?.trim().parse().ok()?;
-    let minor = it.next().unwrap_or("0").trim().parse().unwrap_or(0);
-    // The patch field is where a suffix like "1.0.0-beta" turns up, so it is
-    // read up to the first character that is not a digit.
-    let patch = it
-        .next()
-        .unwrap_or("0")
-        .trim()
-        .split(|c: char| !c.is_ascii_digit())
-        .next()
-        .unwrap_or("0")
-        .parse()
-        .unwrap_or(0);
-    Some((major, minor, patch))
-}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -167,104 +164,93 @@ pub struct Config {
     /// not this game.
     pub allowed_origins: Vec<String>,
 
-    /// The secrets a client may sign its handshake with. Comma separated in
-    /// `SYNX_CLIENT_SECRET`; a client is admitted if it matches ANY of them.
-    ///
-    /// A LIST RATHER THAN ONE VALUE, because the client is a public download
-    /// and the alternative is a trap. With a single secret, changing it here
-    /// instantly breaks every copy anyone has already installed - there is no
-    /// window in which both the old build and the new one work, so rotating
-    /// the key and shipping the update can never be two separate decisions.
-    ///
-    /// With a list they are. Add the new secret beside the old one, ship the
-    /// build that uses it, wait as long as you like, then drop the old entry.
-    /// Dropping it is what retires the builds that carry it - deliberately,
-    /// at a moment you choose, rather than the instant you edit a variable.
-    ///
-    /// Empty means attestation is skipped, and the fact is logged loudly at
-    /// boot: a server that believes it is locked down and is not is worse than
-    /// one that never claimed to be.
-    pub client_secrets: Vec<Vec<u8>>,
-
-    /// The oldest client build this server will admit, from `SYNX_MIN_CLIENT`
-    /// as `major.minor.patch`.
-    ///
-    /// The build string travels INSIDE the attestation signature, so an
-    /// attested client cannot claim to be newer than it is. That makes this
-    /// the one lever that retires a compromised or broken release without
-    /// waiting for anybody to update anything: raise the floor, and the old
-    /// builds are told to update the next time they connect.
-    pub min_client: Option<(u32, u32, u32)>,
-
-    /// Whether a client that fails the origin or attestation check is refused
-    /// or merely logged.
-    ///
-    /// Strict is the default and the intended posture. The permissive setting
-    /// exists for the afternoon when a deployment is being moved and locking
-    /// yourself out of your own server is a real risk; it is not a setting to
-    /// leave on.
-    pub strict_client: bool,
-
-    /// Secret the session tokens are signed with. Generated per process when
-    /// unset, which is safe: a session does not outlive the process either
-    /// way, so a token that stops verifying after a restart names a session
-    /// that no longer exists.
+    /// Secret the session tokens are signed with. Generated fresh every time
+    /// the process starts, which is safe rather than merely convenient: a
+    /// session never outlives the process, so a token that stops verifying
+    /// after a restart names a session that no longer exists anyway. There is
+    /// nothing to persist and therefore nothing to configure.
     pub token_secret: [u8; 32],
-    /// Whether the secret was generated rather than supplied, for the boot log.
-    pub token_secret_generated: bool,
 }
 
 impl Config {
     pub fn from_env() -> Config {
-        let secret_env = std::env::var("SYNX_TOKEN_SECRET").ok().filter(|s| s.len() >= 16);
-        let mut secret = [0u8; 32];
-        let generated = match &secret_env {
-            Some(s) => {
-                // Stretched rather than truncated, so a short but high-entropy
-                // secret is not silently cut down to its first 32 bytes.
-                use sha2::{Digest, Sha256};
-                let mut h = Sha256::new();
-                h.update(b"synx-session-v1");
-                h.update(s.as_bytes());
-                secret.copy_from_slice(&h.finalize());
-                false
-            }
-            None => {
-                use rand::RngCore;
-                rand::thread_rng().fill_bytes(&mut secret);
-                true
-            }
-        };
+        // Fresh every boot. See the note on the field: there is nothing worth
+        // persisting here, so there is nothing to ask anybody to set.
+        let mut token_secret = [0u8; 32];
+        {
+            use rand::RngCore;
+            rand::thread_rng().fill_bytes(&mut token_secret);
+        }
 
         Config {
+            // The one value the host insists on choosing.
             port: env_or("PORT", 10_000u16),
-            snapshot_hz: env_or::<u32>("SYNX_SNAPSHOT_HZ", synx_net::SERVER_SNAPSHOT_HZ).clamp(5, 30),
-            lobby_hz: env_or::<u32>("SYNX_LOBBY_HZ", 4).clamp(1, 10),
-            max_rooms: env_or::<usize>("SYNX_MAX_ROOMS", 24).clamp(1, 512),
-            max_connections: env_or::<usize>("SYNX_MAX_CONNECTIONS", 96).clamp(2, 4096),
-            max_per_ip: env_or::<usize>("SYNX_MAX_PER_IP", 4).clamp(1, 64),
-            session_ttl: Duration::from_secs(env_or::<u64>("SYNX_SESSION_TTL", 43_200).clamp(300, 604_800)),
-            session_idle: Duration::from_secs(env_or::<u64>("SYNX_SESSION_IDLE", 1_800).clamp(60, 86_400)),
-            register_per_minute: env_or::<u32>("SYNX_REGISTER_PER_MINUTE", 12).clamp(1, 600),
-            pow_bits: env_or::<u32>("SYNX_POW_BITS", 16).clamp(0, 26),
-            state_rate: env_or::<f64>("SYNX_STATE_RATE", 45.0).clamp(5.0, 200.0),
-            control_rate: env_or::<f64>("SYNX_CONTROL_RATE", 6.0).clamp(1.0, 60.0),
-            chat_rate: env_or::<f64>("SYNX_CHAT_RATE", 1.0).clamp(0.1, 10.0),
-            client_timeout: Duration::from_secs(env_or::<u64>("SYNX_CLIENT_TIMEOUT", 25).clamp(5, 300)),
-            ping_every: Duration::from_secs(env_or::<u64>("SYNX_PING_EVERY", 8).clamp(2, 60)),
-            write_timeout: Duration::from_secs(env_or::<u64>("SYNX_WRITE_TIMEOUT", 10).clamp(2, 60)),
-            countdown: Duration::from_millis(env_or::<u64>("SYNX_COUNTDOWN_MS", 5_000).clamp(1_000, 30_000)),
-            finish_grace: Duration::from_secs(env_or::<u64>("SYNX_FINISH_GRACE", 75).clamp(10, 600)),
-            results_hold: Duration::from_secs(env_or::<u64>("SYNX_RESULTS_HOLD", 20).clamp(5, 120)),
-            race_timeout: Duration::from_secs(env_or::<u64>("SYNX_RACE_TIMEOUT", 1_500).clamp(60, 7_200)),
-            empty_room_grace: Duration::from_secs(env_or::<u64>("SYNX_EMPTY_ROOM_GRACE", 20).clamp(1, 600)),
-            correction_strikes: env_or::<u32>("SYNX_CORRECTION_STRIKES", 40).clamp(3, 10_000),
-            http_rate: env_or::<f64>("SYNX_HTTP_RATE", 8.0).clamp(0.5, 500.0),
-            connect_rate: env_or::<f64>("SYNX_CONNECT_RATE", 1.0).clamp(0.1, 100.0),
-            accept_rate: env_or::<f64>("SYNX_ACCEPT_RATE", 20.0).clamp(1.0, 2_000.0),
-            max_inflight: env_or::<usize>("SYNX_MAX_INFLIGHT", 64).clamp(4, 4_096),
-            request_timeout: Duration::from_secs(env_or::<u64>("SYNX_REQUEST_TIMEOUT", 15).clamp(1, 120)),
-            max_socket: Duration::from_secs(env_or::<u64>("SYNX_MAX_SOCKET", 10_800).clamp(60, 86_400)),
+
+            // TICK RATES. Twenty snapshots a second is the point past which
+            // the interpolator on the client stops being able to tell the
+            // difference, and every one above it costs bandwidth for nothing.
+            // An idle lobby needs far less: four is enough to feel live.
+            snapshot_hz: synx_net::SERVER_SNAPSHOT_HZ,
+            lobby_hz: 4,
+
+            // CAPACITY. The two numbers between this process and its memory
+            // limit - a room is about 4 kB, a connection with its buffers
+            // about 64 kB. Both are set well under what the memory allows,
+            // because the ceiling that binds first is CPU: refusing one player
+            // is much better than serving two hundred of them badly. Four per
+            // address is a household, not a botnet.
+            max_rooms: 24,
+            max_connections: 96,
+            max_per_ip: 4,
+
+            // SESSIONS. Twelve hours is longer than anybody plays in one
+            // sitting; half an hour idle is long enough to survive making tea.
+            session_ttl: Duration::from_secs(43_200),
+            session_idle: Duration::from_secs(1_800),
+            register_per_minute: 12,
+            // Sixteen bits is a few milliseconds of work for one honest player
+            // and hours for somebody trying to register thousands of sessions.
+            // That asymmetry is the entire point of the proof.
+            pow_bits: 16,
+
+            // WHAT ONE CLIENT MAY SEND. Comfortably above what the game
+            // actually produces, so a burst after a stall is absorbed rather
+            // than punished, and far below what a flood would need.
+            state_rate: 45.0,
+            control_rate: 6.0,
+            chat_rate: 1.0,
+
+            // LIVENESS. A probe every eight seconds and a twenty-five second
+            // patience: long enough that a train tunnel is survivable, short
+            // enough that a dead socket does not hold a seat for a minute.
+            client_timeout: Duration::from_secs(25),
+            ping_every: Duration::from_secs(8),
+            write_timeout: Duration::from_secs(10),
+
+            // RACE TIMING. Five seconds of lights; seventy-five seconds after
+            // the winner for everybody else to finish; twenty seconds on the
+            // results board; twenty-five minutes before a race is presumed
+            // abandoned.
+            countdown: Duration::from_millis(5_000),
+            finish_grace: Duration::from_secs(75),
+            results_hold: Duration::from_secs(20),
+            race_timeout: Duration::from_secs(1_500),
+            empty_room_grace: Duration::from_secs(20),
+
+            // ANTI-CHEAT. Forty corrections is a great many for a bad
+            // connection and very few for a modified client.
+            correction_strikes: 40,
+
+            // OVERLOAD PROTECTION. Everything here is per address.
+            http_rate: 8.0,
+            connect_rate: 1.0,
+            accept_rate: 20.0,
+            max_inflight: 64,
+            request_timeout: Duration::from_secs(15),
+            max_socket: Duration::from_secs(10_800),
+
+            // The one genuine deployment difference: if you serve the web
+            // build from your own domain, that domain has to be named here.
             allowed_origins: {
                 let configured: Vec<String> = std::env::var("SYNX_ALLOWED_ORIGINS")
                     .unwrap_or_default()
@@ -278,23 +264,13 @@ impl Config {
                     configured
                 }
             },
-            client_secrets: std::env::var("SYNX_CLIENT_SECRET")
-                .unwrap_or_default()
-                .split(',')
-                .map(|s| s.trim())
-                // Short entries are dropped rather than accepted, so a typo
-                // cannot quietly weaken the check to something guessable.
-                .filter(|s| s.len() >= 16)
-                .map(|s| s.as_bytes().to_vec())
-                .collect(),
-            min_client: std::env::var("SYNX_MIN_CLIENT").ok().and_then(|s| parse_version(&s)),
-            strict_client: env_or::<bool>("SYNX_STRICT_CLIENT", true),
-            token_secret: secret,
-            token_secret_generated: generated,
+
+            token_secret,
         }
     }
 
-    /// One line per setting, at boot. See the note at the top of the file.
+    /// One line per setting, at boot, so that what the process is actually
+    /// doing can be read off the log rather than inferred from this file.
     pub fn log(&self) {
         info!("---- configuration ----------------------------------------");
         info!(port = self.port, "listen");
@@ -341,31 +317,10 @@ impl Config {
             max_socket_s = self.max_socket.as_secs(),
             "overload protection"
         );
-        info!(
-            generated = self.token_secret_generated,
-            "token secret{}",
-            if self.token_secret_generated {
-                " (generated per process; sessions end with a restart)"
-            } else {
-                ""
-            }
-        );
         if self.allowed_origins.is_empty() {
             warn!("origins: ANY - this server will answer a client on any site");
         } else {
-            info!(origins = ?self.allowed_origins, strict = self.strict_client, "origins");
-        }
-        match (self.client_secrets.len(), self.strict_client) {
-            (0, _) => warn!(
-                "client attestation: OFF - set SYNX_CLIENT_SECRET to the value \
-                 the game was built with to accept only your own client"
-            ),
-            (n, true) => info!(keys = n, "client attestation: required"),
-            (n, false) => warn!(keys = n, "client attestation: checked but not enforced"),
-        }
-        match self.min_client {
-            Some((a, b, c)) => info!("minimum client build: {a}.{b}.{c}"),
-            None => info!("minimum client build: any"),
+            info!(origins = ?self.allowed_origins, "origins");
         }
         info!("-----------------------------------------------------------");
     }

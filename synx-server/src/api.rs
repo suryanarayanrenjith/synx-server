@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::json;
 use tracing::{info, warn};
 
-use crate::client::{self, Claim};
+use crate::client;
 use crate::hub::Hub;
 use crate::identity::{
     self, ChallengeResponse, DevicePrint, RegisterError, RegisterRequest, RegisterResponse,
@@ -113,7 +113,6 @@ pub async fn handshake(State(hub): State<Arc<Hub>>) -> impl IntoResponse {
         server_time_ms: identity::now_ms(),
         protocol: synx_net::PROTOCOL_VERSION,
         fingerprint: synx_net::WIRE_FINGERPRINT,
-        attestation_required: !hub.config.client_secrets.is_empty() && hub.config.strict_client,
         build: crate::BUILD,
         ready: hub.is_ready(),
     })
@@ -149,17 +148,11 @@ pub async fn session(
         return refuse(RegisterError::ProtocolMismatch, RegisterError::ProtocolMismatch.as_str());
     }
 
-    // Is this our client, speaking our wire format? Answered before the proof
-    // of work is verified and before anything is allocated for this caller,
-    // because a client that will not be admitted should cost one HMAC.
-    let claim = Claim {
-        challenge: &req.challenge,
-        protocol: if req.protocol == 0 { synx_net::PROTOCOL_VERSION } else { req.protocol },
-        fingerprint: req.fingerprint,
-        build: &req.build,
-        attestation: Some(req.attestation.as_str()).filter(|s| !s.is_empty()),
-    };
-    if let Err(r) = client::admit(&hub.config, &headers, &claim) {
+    // Does this client speak our wire format, and is it allowed here?
+    // Answered before the proof of work is verified and before anything is
+    // allocated for this caller, because a client that will not be admitted
+    // should cost an integer compare.
+    if let Err(r) = client::admit(&hub.config, &headers, req.fingerprint) {
         hub.stats.clients_refused.fetch_add(1, Ordering::Relaxed);
         warn!(
             %ip,
@@ -303,10 +296,6 @@ pub async fn stats(State(hub): State<Arc<Hub>>) -> impl IntoResponse {
         },
         "client_gate": {
             "origins": hub.config.allowed_origins,
-            "strict": hub.config.strict_client,
-            "attestation": !hub.config.client_secrets.is_empty(),
-            "attestation_keys": hub.config.client_secrets.len(),
-            "min_client": hub.config.min_client.map(|(a, b, c)| format!("{a}.{b}.{c}")),
             "refused": s.clients_refused.load(Ordering::Relaxed),
         },
         "faults": {

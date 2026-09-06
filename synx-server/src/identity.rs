@@ -587,14 +587,11 @@ pub struct RegisterRequest {
     /// older than the check, which is refused the same way a wrong one is.
     #[serde(default)]
     pub fingerprint: u32,
-    /// What the client says it is. Inside the attestation signature, so it
-    /// cannot be edited without invalidating it.
+    /// What the client says it is - self-reported, and useful for reading a
+    /// log rather than for deciding anything. The wire fingerprint above is
+    /// the field that actually gates admission.
     #[serde(default)]
     pub build: String,
-    /// Proof that this is the shipped game. See `client.rs` for exactly what
-    /// that does and does not establish.
-    #[serde(default)]
-    pub attestation: String,
     #[serde(default)]
     pub device: DevicePrint,
 }
@@ -629,10 +626,6 @@ pub struct ChallengeResponse {
     /// before it spends a second solving a proof of work it will not be able
     /// to use.
     pub fingerprint: u32,
-    /// Whether this server will refuse a client that cannot sign the
-    /// challenge. Advertised so the client can say "this server only accepts
-    /// the official game" rather than reporting a bare refusal.
-    pub attestation_required: bool,
     pub build: &'static str,
     /// True when the instance has finished loading and can take players. The
     /// client uses this to tell "waking up" from "here".

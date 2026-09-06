@@ -96,7 +96,7 @@ pub async fn upgrade(
     // for a browser client this is the only place the same check can be made -
     // and without it the socket would be the unguarded way in to a server whose
     // front door is locked.
-    if hub.config.strict_client {
+    {
         if let crate::client::OriginVerdict::Refused =
             crate::client::check_origin(&hub.config, &headers)
         {
@@ -532,8 +532,10 @@ impl Conn {
             }
             ClientMsg::Leave {} => {
                 if let Some(h) = self.room.take() {
+                    // `Left`, not `Dropped`: they said so, so the seat goes
+                    // back now rather than after the reconnection grace.
                     let _ =
-                        h.tx.send(RoomMsg::Dropped { slot: self.slot, session: self.session.id }).await;
+                        h.tx.send(RoomMsg::Left { slot: self.slot, session: self.session.id }).await;
                     self.slot = 0;
                 }
             }

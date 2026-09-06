@@ -3,13 +3,13 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
-pub mod auth;
+pub mod fingerprint;
 pub mod msg;
 pub mod pow;
 pub mod quant;
 pub mod wire;
 
-pub use auth::WIRE_FINGERPRINT;
+pub use fingerprint::WIRE_FINGERPRINT;
 pub use msg::{CarState, CorrectionMsg, Snapshot, SnapshotEntry, CAR_BODY_BYTES};
 pub use quant::{deq_angle, deq_unit, q_angle, q_unit};
 pub use wire::{Reader, WireError, Writer};

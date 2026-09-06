@@ -29,8 +29,19 @@ const RECONNECT_GRACE: Duration = Duration::from_secs(25);
 /// What a connection sends to a room.
 pub enum RoomMsg {
     Join(Box<JoinRequest>),
-    /// The socket for `slot` has gone. The seat may be held; see the grace.
+    /// The socket for `slot` has gone without saying anything. The seat may be
+    /// held; see the grace.
     Dropped { slot: u8, session: u64 },
+    /// The player SAID they are leaving.
+    ///
+    /// Deliberately not the same message as `Dropped`, because the two mean
+    /// opposite things about whether anybody is coming back. A drop mid-race
+    /// is usually a lift with no signal, and holding the seat for a few
+    /// seconds is what turns that into a hiccup rather than a lost race. A
+    /// player who has walked back to the title screen is not in a lift, and
+    /// holding their car on the road until a grace period expires is what
+    /// leaves rooms sitting in the log with a driver in them who has gone.
+    Left { slot: u8, session: u64 },
     /// A validated-on-arrival binary state packet.
     State { slot: u8, session: u64, car: CarState },
     /// A lobby message.
@@ -342,6 +353,7 @@ impl Room {
         match msg {
             RoomMsg::Join(req) => self.on_join(*req),
             RoomMsg::Dropped { slot, session } => self.on_dropped(slot, session),
+            RoomMsg::Left { slot, session } => self.on_left(slot, session),
             RoomMsg::State { slot, session, car } => self.on_state(slot, session, car),
             RoomMsg::Control { slot, session, msg } => self.on_control(slot, session, *msg),
             RoomMsg::Rtt { slot, rtt_ms } => {
@@ -453,6 +465,21 @@ impl Room {
             self.notice("dropped", format!("{name} lost connection"));
             self.broadcast_room();
         }
+    }
+
+    /// The player asked to go. No grace and no held seat: unlike a dropped
+    /// socket this is a statement of intent, and the seat is freed whatever
+    /// phase the room is in.
+    fn on_left(&mut self, slot: u8, session: u64) {
+        let Some(p) = self.player_mut(slot) else { return };
+        if p.session != session {
+            // A stale message from a socket whose seat has already been reused.
+            return;
+        }
+        p.link = None;
+        p.dropped_at = None;
+        p.ready = false;
+        self.release(slot, "left");
     }
 
     /// Empty a seat for good.

@@ -1,4 +1,13 @@
-# Render deployment configuration for the SYNX server.
+# Render deployment for a SYNX grid.
+#
+# This file is an example, not a requirement. The server needs no configuration
+# to run: `cargo run --release` gives you a working grid on port 10000, and the
+# Dockerfile beside this file builds the same thing anywhere a container runs.
+# Everything below is either something the host insists on choosing, or a
+# preference about logging.
+#
+# If you are deploying somewhere else - Fly, Railway, a box under a desk - the
+# only thing you have to honour is PORT.
 services:
   - type: web
     name: synx-multiplayer
@@ -10,102 +19,30 @@ services:
     healthCheckPath: /healthz
     autoDeploy: true
     envVars:
-      # PORT is injected by Render.
+      # PORT is injected by Render, and the server obeys it. That is the whole
+      # of the required configuration.
 
-      # Secret used to sign session tokens.
-      - key: SYNX_TOKEN_SECRET
-        generateValue: true
-
-      # ---- who is allowed in -------------------------------------------
-      # The keys the game client may be BUILT with. Cannot be generated here:
-      # the same value has to be compiled into the desktop build, or the server
-      # refuses its own game. Set it by hand and keep it wherever releases are
-      # built from.
+      # WHO MAY CONNECT.
       #
-      # A LIST, comma separated - a client matching any entry is admitted. That
-      # is what lets a key be rotated without bricking the copies people have
-      # already downloaded: add the new one beside the old, ship the build that
-      # uses it, then drop the old entry when you are ready to retire the
-      # builds that carry it.
+      # Unset, the server accepts the origins a SYNX desktop build presents,
+      # which is what the shipped game needs and nothing more. Set it if you
+      # serve the web build from your own domain - that domain has to be named
+      # here or the browser's own Origin header will get it turned away.
       #
-      # Left unset, the server accepts any client and warns about it at boot,
-      # which is right for a first deploy and not for the one the public uses.
-      #
-      # Worth knowing what this is and is not: a secret inside a public
-      # download is not a secret. It raises the cost of misuse from "copy a
-      # URL" to "reverse-engineer a binary" and tags which build is calling.
-      # It is not what keeps the server safe - the physics validator, the proof
-      # of work and the rate limits below are.
-      - key: SYNX_CLIENT_SECRET
-        sync: false
-
-      # The oldest client build admitted, as major.minor.patch. The build
-      # string is inside the attestation signature, so it cannot be faked.
-      # Raising this retires old releases immediately, for everyone, without
-      # shipping anything - which is what makes a leaked key recoverable.
-      # Unset means any version.
-      - key: SYNX_MIN_CLIENT
-        sync: false
-
-      # The origins a Tauri desktop build presents. Unset, the server uses
-      # exactly this list as its default; it is written out here so that
-      # changing it is an edit rather than an archaeology expedition.
+      # This check is decisive against a web page and worth nothing against a
+      # native process, which can send any header it likes. That is fine and
+      # intended: it exists to stop another SITE quietly using your server as
+      # free infrastructure, not to establish who wrote the client. See
+      # src/client.rs for the honest version of that argument.
       - key: SYNX_ALLOWED_ORIGINS
         value: tauri://localhost,http://tauri.localhost,https://tauri.localhost
-
-      # Refuse rather than merely log. See src/client.rs.
-      - key: SYNX_STRICT_CLIENT
-        value: "true"
-
-      - key: RUST_LOG
-        value: info,synx_server=debug
-      - key: RUST_BACKTRACE
-        value: "1"
 
       # A container reports the host's whole CPU count, so the tokio default
       # would spawn eight workers to share a fraction of a core.
       - key: SYNX_WORKERS
         value: "2"
 
-      # ---- capacity ----------------------------------------------------
-      - key: SYNX_MAX_ROOMS
-        value: "24"
-      - key: SYNX_MAX_CONNECTIONS
-        value: "96"
-      - key: SYNX_MAX_PER_IP
-        value: "4"
-      - key: SYNX_MAX_INFLIGHT
-        value: "64"
-
-      # ---- tick rates --------------------------------------------------
-      - key: SYNX_SNAPSHOT_HZ
-        value: "20"
-      - key: SYNX_LOBBY_HZ
-        value: "4"
-
-      # ---- overload and abuse -----------------------------------------
-      # HTTP requests per address per second, connection attempts per address
-      # per second, and new connections per second across the whole process.
-      # Anything over these is throttled and then jailed; see src/limits.rs.
-      - key: SYNX_HTTP_RATE
-        value: "8"
-      - key: SYNX_CONNECT_RATE
+      - key: RUST_LOG
+        value: info,synx_server=debug
+      - key: RUST_BACKTRACE
         value: "1"
-      - key: SYNX_ACCEPT_RATE
-        value: "20"
-      - key: SYNX_REQUEST_TIMEOUT
-        value: "15"
-      - key: SYNX_MAX_SOCKET
-        value: "10800"
-
-      # ---- identity ----------------------------------------------------
-      - key: SYNX_POW_BITS
-        value: "16"
-      - key: SYNX_REGISTER_PER_MINUTE
-        value: "12"
-      - key: SYNX_SESSION_TTL
-        value: "43200"
-
-      # ---- anti-cheat --------------------------------------------------
-      - key: SYNX_CORRECTION_STRIKES
-        value: "40"
