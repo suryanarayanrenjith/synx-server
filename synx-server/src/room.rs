@@ -176,11 +176,57 @@ struct Player {
     /// is where the cost actually lands.
     chat: Bucket,
     place: u8,
+    /// The last timestamp published for this car, so a snapshot can never walk
+    /// one backwards. See [`Player::publish_stamp`].
+    published_t: u32,
     /// Set once they are out: kicked, or too many strikes.
     removed: bool,
 }
 
 impl Player {
+    /// WHEN THE STATE ABOUT TO BE PUBLISHED WAS ACTUALLY TRUE.
+    ///
+    /// This used to be `now_ms()` - the moment the snapshot was assembled -
+    /// and that is the single most expensive mistake it is possible to make in
+    /// this file, because it is invisible from either side on its own.
+    ///
+    /// A client publishes thirty times a second and the room publishes twenty.
+    /// So the state a tick picks up is anywhere from zero to a full client
+    /// interval old, and WHICH it is alternates: at 30 into 20 the samples
+    /// actually forwarded are 33 ms apart, then 67, then 33, then 67. Stamping
+    /// all of them `now` throws that away and asserts they were 50 ms apart,
+    /// evenly. The receiving client believes it - it has nothing else to go on
+    /// - and reconstructs the car by laying an uneven sequence of positions
+    /// onto an even grid of times.
+    ///
+    /// The result is not a small error. The interpolator is a cubic Hermite
+    /// whose tangents are the velocities measured AT each sample, so when the
+    /// chord between two samples is two thirds of what the velocity says it
+    /// should be, the curve slows to a crawl in the middle of the segment; on
+    /// the next segment the chord is four thirds and it surges. A car holding
+    /// a dead constant 60 u/s is drawn oscillating between roughly 31 and 89,
+    /// twenty times a second. That is the jerking, and every part of it is
+    /// manufactured here.
+    ///
+    /// So the client's own timestamp is forwarded instead. It is already on
+    /// this clock - that is what the handshake in `ws.rs` is for - and the
+    /// validator has already refused anything that rewinds or claims the
+    /// future, so what arrives here is a monotonic, honest sampling time.
+    ///
+    /// What is still applied is a bound, because "honest" is a statement about
+    /// the ordinary client and this is a public server. A stamp may not be in
+    /// the future (nothing is true yet), may not be older than the protocol's
+    /// own clock tolerance (that is the point past which it is a broken clock
+    /// rather than a slow link, and letting it through would drag every
+    /// receiver's playout buffer out to absorb one bad peer), and may not go
+    /// backwards.
+    fn publish_stamp(&mut self, now_ms: u32) -> u32 {
+        let floor = now_ms.saturating_sub(synx_net::MAX_CLOCK_SKEW_MS as u32);
+        let stamp = self.track.last.t_ms.clamp(floor, now_ms).max(self.published_t);
+        self.published_t = stamp;
+        stamp
+    }
+
     fn view(&self, host: u8, map: &maps::Map) -> PlayerView {
         PlayerView {
             slot: 0, // filled by the caller, which knows the index
@@ -490,6 +536,7 @@ impl Room {
             track: validate::Track::new(),
             chat: Bucket::new(self.config.chat_rate, 3.0),
             place: 0,
+            published_t: 0,
             removed: false,
         });
         if was_empty {
@@ -845,6 +892,12 @@ impl Room {
         for i in 0..MAX_PLAYERS {
             let Some(p) = self.players[i].as_mut() else { continue };
             p.place = 0;
+            // The grid stamps the car half a second in the past, which is BEHIND
+            // the last stamp published for the race that just ended. Without
+            // this the monotonic guard in `publish_stamp` would pin every car
+            // to the old race until the clock caught up, and the whole grid
+            // would sit frozen through its own countdown.
+            p.published_t = 0;
             if p.link.is_none() {
                 // A player who is mid-reconnect still gets a seat on the grid;
                 // if they come back before the lights they are simply racing.
@@ -1109,11 +1162,12 @@ impl Room {
     /// sits inside each entry rather than being addressed at a viewer. A
     /// client skips its own car by slot.
     fn broadcast_snapshot(&mut self) {
+        let now_ms = self.now_ms();
         let mut entries: [SnapshotEntry; MAX_PLAYERS] = Default::default();
         let mut n = 0usize;
         let live = self.phase == Phase::Racing;
         for i in 0..MAX_PLAYERS {
-            let Some(p) = self.players[i].as_ref() else { continue };
+            let Some(p) = self.players[i].as_mut() else { continue };
             if !p.track.started {
                 continue;
             }
@@ -1124,7 +1178,10 @@ impl Room {
             if p.link.is_none() {
                 car.flags |= flag::IDLE;
             }
-            car.t_ms = self.now_ms();
+            // The moment this was true, NOT the moment it was sent. See
+            // `Player::publish_stamp` - the difference is the whole of the
+            // smoothness of every remote car in the game.
+            car.t_ms = p.publish_stamp(now_ms);
             entries[n] = SnapshotEntry {
                 slot: i as u8,
                 place: p.place,
@@ -1374,5 +1431,75 @@ mod tests {
         assert!(s.joinable());
         s.players.store(4, Ordering::Relaxed);
         assert!(!s.joinable());
+    }
+
+
+    /* THE STAMP ON A PUBLISHED CAR.
+     *
+     * Driven through a `Player` rather than a whole `Room`, for the reason the
+     * ban set is: a room needs a hub, a course and a runtime, and none of
+     * those is what decides this. What decides it is `publish_stamp`, and the
+     * thing worth pinning is that it carries the SPACING of the sender
+     * through - which is exactly what the old `car.t_ms = now_ms()` destroyed
+     * and what every remote car s smoothness rests on. */
+    fn a_player() -> Player {
+        Player {
+            session: 1,
+            name: String::new(),
+            device: String::new(),
+            link: None,
+            dropped_at: None,
+            ready: false,
+            rtt_ms: 0,
+            track: validate::Track::new(),
+            chat: Bucket::new(1.0, 3.0),
+            place: 0,
+            published_t: 0,
+            removed: false,
+        }
+    }
+
+    #[test]
+    fn a_published_stamp_keeps_the_senders_own_spacing() {
+        let mut p = a_player();
+        // A client sending at thirty hertz into a room ticking at twenty: the
+        // states a tick actually picks up are 33 ms apart, then 67, then 33.
+        let sampled = [1000u32, 1033, 1100, 1133, 1200, 1233];
+        let ticks   = [1050u32, 1100, 1150, 1200, 1250, 1300];
+        let mut out = Vec::new();
+        for (s, t) in sampled.iter().zip(ticks.iter()) {
+            p.track.last.t_ms = *s;
+            out.push(p.publish_stamp(*t));
+        }
+        assert_eq!(out, sampled, "the sender s own timing has to survive the room");
+        let gaps: Vec<u32> = out.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.iter().any(|g| *g != 50),
+            "every gap came out at the tick period, which is the bug: {gaps:?}");
+    }
+
+    #[test]
+    fn a_published_stamp_is_bounded_and_never_walks_backwards() {
+        let mut p = a_player();
+        p.track.last.t_ms = 10_000;
+        assert_eq!(p.publish_stamp(10_040), 10_000);
+
+        // Nothing is true in the future, however the sender stamped it.
+        p.track.last.t_ms = 99_000;
+        assert_eq!(p.publish_stamp(10_080), 10_080);
+
+        // ...and a stamp already published is never withdrawn, or the
+        // receiver s history would stop being monotonic and its bracket
+        // search would hand back two samples in the wrong order.
+        p.track.last.t_ms = 10_010;
+        assert_eq!(p.publish_stamp(10_120), 10_080);
+
+        // A clock far enough out that it is broken rather than slow is pulled
+        // up to the tolerance, so one bad peer cannot drag every receiver s
+        // playout buffer out to absorb it.
+        let mut q = a_player();
+        q.track.last.t_ms = 1;
+        let now = 50_000;
+        let got = q.publish_stamp(now);
+        assert_eq!(got, now - synx_net::MAX_CLOCK_SKEW_MS as u32);
     }
 }
