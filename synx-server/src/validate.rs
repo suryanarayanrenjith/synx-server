@@ -250,12 +250,17 @@ pub fn check(track: &mut Track, rules: &Rules<'_>, claim: &CarState) -> Verdict 
     let s = proj.s;
 
     // ---- 6. the road under the car ---------------------------------------
+    //
+    // Above it by more than the tolerance is flying - except over a ramp,
+    // where the structure and the launch are allowed for on top of the
+    // tolerance; see `ramps.rs`. Below it is never allowed for anything.
     let road = course.at(s);
     let mut altitude = ALTITUDE_TOLERANCE;
     if course.tunnel_at(s) {
         altitude *= 2.0;
     }
-    if (claim.y - road.y).abs() > altitude {
+    let above = claim.y - road.y;
+    if above < -altitude || above > altitude + crate::ramps::headroom(course, s, ceiling) {
         return refuse(track, Correction::Altitude);
     }
 
@@ -580,6 +585,83 @@ mod tests {
             check(&mut t, &rules(&c, m, 100), &claim).rejected(),
             Some(Correction::Altitude)
         );
+    }
+
+    /// Every ramp on the course, jumped flat out: the car leaves the lip at
+    /// the ceiling on the incline's own angle and flies a ballistic arc until
+    /// it is back on the road, reporting thirty times a second the whole way.
+    /// Not one packet of that may be refused - it used to be, as `Altitude`,
+    /// on five ramps of nine. See `ramps.rs`.
+    #[test]
+    fn a_jump_is_never_refused() {
+        let c = course();
+        let v = Ruleset::Stock.ceiling() * 0.98;
+        // the solver's air gravity, AIR_G - see ramps.rs
+        let g = 27.0f32;
+        for r in crate::ramps::RAMPS.iter() {
+            let m = MAPS.iter().find(|m| r.lip > m.from && r.lip < m.to).expect("a ramp off every route");
+            let mut t = Track::new();
+            t.place(m, &c, 0, 2, 0);
+            // on the road, a little before the climb, already in the race
+            let s0 = r.foot - 30.0;
+            t.last = in_lane(&c, s0, 0.0, v, 1_000);
+            t.max_s = s0;
+            t.checkpoint = m.gates_passed(s0);
+            let rules_at = |now: u32| Rules { map: m, course: &c, ruleset: Ruleset::Stock, now_ms: now, live: true };
+
+            // what the solver does at the lip: the along-track speed carries
+            // on and the upward speed is that times the lip's slope
+            let (vs, up) = (v, v * r.slope);
+            let base = c.at(r.lip).y + r.top + 1.05;
+            let mut now = 1_000u32;
+            let mut s = s0;
+            let mut flying = false;
+            let mut t_air = 0.0f32;
+            for _ in 0..600 {
+                now += 33;
+                let dt = 0.033f32;
+                let y;
+                if s < r.lip {
+                    // up the structure: its own height, linear from the foot
+                    s += v * dt;
+                    let k = ((s - r.foot) / (r.lip - r.foot)).clamp(0.0, 1.0);
+                    y = c.at(s).y + 1.05 + r.top * if r.id == "l6_roof" { (k * 7.0).min(1.0) } else { k };
+                } else {
+                    flying = true;
+                    t_air += dt;
+                    s += vs * dt;
+                    let road = c.at(s).y + 1.05;
+                    y = (base + up * t_air - 0.5 * g * t_air * t_air).max(road);
+                    if y <= road && t_air > 0.2 {
+                        break;
+                    }
+                }
+                let mut claim = in_lane(&c, s, 0.0, v, now);
+                claim.y = y;
+                if let Verdict::Reject(why) = check(&mut t, &rules_at(now), &claim) {
+                    panic!("{} refused at s={s:.0}, {:.1} above the road: {why:?}", r.id, y - c.at(s).y);
+                }
+            }
+            assert!(flying, "{} never left the lip", r.id);
+        }
+    }
+
+    /// ...and the headroom is the ramp's, not everyone's: the same height on
+    /// a stretch of road with no structure on it is flying, as it always was.
+    #[test]
+    fn a_ramps_height_away_from_a_ramp_is_still_refused() {
+        let c = course();
+        let m = &MAPS[4];
+        let mut t = Track::new();
+        t.place(m, &c, 0, 2, 0);
+        let s0 = 85_000.0f32;
+        t.last = in_lane(&c, s0, 0.0, 90.0, 1_000);
+        t.max_s = s0;
+        t.checkpoint = m.gates_passed(s0);
+        let mut claim = in_lane(&c, s0 + 3.0, 0.0, 90.0, 1_033);
+        claim.y += 11.0;
+        let r = Rules { map: m, course: &c, ruleset: Ruleset::Stock, now_ms: 1_033, live: true };
+        assert_eq!(check(&mut t, &r, &claim).rejected(), Some(Correction::Altitude));
     }
 
     #[test]

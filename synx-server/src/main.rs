@@ -21,6 +21,7 @@ mod hub;
 mod identity;
 mod limits;
 mod maps;
+mod ramps;
 mod room;
 mod sync;
 mod validate;

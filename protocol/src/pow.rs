@@ -197,8 +197,8 @@ fn decimal(mut n: u64, buf: &mut [u8; 24]) -> &[u8] {
 mod tests {
     use super::*;
 
-    fn hex(d: &[u8]) -> alloc_string {
-        let mut s = alloc_string::new();
+    fn hex(d: &[u8]) -> HexBuf {
+        let mut s = HexBuf::new();
         for b in d {
             s.push_hex(*b);
         }
@@ -206,14 +206,14 @@ mod tests {
     }
 
     /// A tiny fixed-size hex buffer, so these tests do not need `alloc`.
-    struct alloc_string {
+    struct HexBuf {
         buf: [u8; 64],
         n: usize,
     }
 
-    impl alloc_string {
+    impl HexBuf {
         fn new() -> Self {
-            alloc_string { buf: [0; 64], n: 0 }
+            HexBuf { buf: [0; 64], n: 0 }
         }
         fn push_hex(&mut self, b: u8) {
             const H: &[u8; 16] = b"0123456789abcdef";
